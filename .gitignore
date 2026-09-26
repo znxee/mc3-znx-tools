@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.o
+*.elf
+*.mod
+*.obj
+*.lib
+*.exp
+*.dll
+output/
+# game data never belongs here
+*.pck
+*.ppf
+*.rsc
+*.iso
+*.p2s
+*.bin
+*.i64
+*.idb

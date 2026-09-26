@@ -1,0 +1,91 @@
+# MANUAL layer of the retail (SLUS_213.55) symbol table.
+#
+# Format:  retail_addr <TAB> name <TAB> origin <TAB> note
+#
+# This layer is written BY HAND and ALWAYS WINS over the machine layers
+# (names.tsv = string matching, names_graph.tsv = graph matching).
+# Running `match`/`graph` again does NOT erase anything here.
+#
+# Any fork that finds or corrects a name records it here:
+#     python mc3_symbols.py annotate 4301A0 mcHood__LoadSomething "confirmed by decompiling"
+# and then `python mc3_symbols.py apply` carries it into the IDA database.
+#
+# To look something up without opening IDA:
+#     python mc3_symbols.py search Hood
+#     python mc3_symbols.py search 430CF8
+00433490	datTimeManager__Update	manual	alpha 0x3F5750; reads the EE Count and produces dt. was my mcTimer__Tick
+00433420	datTimeManager__Reset	manual	alpha 0x3F56F0, timemgr.cpp; was my mcTimer__Reset
+00433A08	datTimeManager__RealTime_float	manual	alpha 0x3F5C00; rate 0 = pure real time, no cap. THIS IS WHAT RUNS
+00433A50	datTimeManager__FixedFrame_float_uint	manual	alpha 0x3F5C48; fixed step - it exists but is NOT what runs
+001A7000	mcGame__ApplyFrameRateConfig	manual	[cfg+0x40]==1 -> real dt; otherwise fixed step with [0x44]=rate [0x54]=count
+001A7150	mcGame__FrameRateConfig_Garage	manual	rate=60.0 count=1 divisor=1 (garage/menus, already runs at 60)
+001A71F0	mcGame__FrameRateConfig_InGame	manual	rate=(refresh>>1)*0.5 count=1 divisor=2 (city)
+00618E20	g_frameDt	manual	the DELTA used by the whole game (290 reads); pedestrians read from here
+00618E28	g_invFps	manual	1.0/dt, read by 48 places
+00618E30	g_fixedStep	manual	fixed step = 1/(rate*count); also serves as a CEILING when 618E48=0
+00618E48	g_fixedStepMode	manual	1 = ignore the clock and use g_fixedStep; 0 = use the capped real dt
+00618E50	g_timeScale	manual	rewritten EVERY frame by mcGame::Update (slow-mo); useless as a patch
+00618E54	g_dtMeasuredQuantized	manual	real dt, optionally rounded to a multiple of 1/60
+00618E58	g_dtMeasuredRaw	manual	pure real dt from the EE Count - exists and is not used
+00320B38	mcFlash__Update	manual	NEGATIVE dt = use the measured real dt (reads g_dtMeasuredQuantized); positive = uses the given value
+0020ACD0	swfCONTEXT__Advance	manual	accumulator += dt; while(acc >= 256.0/swfRate) advance 1 frame
+001AC2A0	mcLoading__UpdateFlashFixed30	manual	passes a HARD-CODED 1/30 at 0x1AC2A4 -> locked at 30fps
+0028ED08	mcLoadingThread__UpdateFlash	manual	passes a HARD-CODED 0.033 at 0x28EE68 -> locked at 30fps
+005280B0	vblank_and_handler	manual	alpha 0x4F5AC0; the bnez at 0x5280F0 is the 60fps patch
+006F48B0	g_fieldsToWait	manual	how many vblanks are left; written by gfxPipeline::BeginFrame, decremented in the handler
+006F48AC	g_threadWaitingVblank	manual	flag: game thread blocked on the semaphore
+00619DFC	g_videoMode	manual	0=640x480 1=640x448 2=512x448(native) - NOT a frame divisor
+004BF468	gfxApplyVideoMode	manual	reads g_videoMode and calls sub_528060 with the resolution
+00463548	mcCreatureAnimator__FindPredictedFrameData	manual	alpha 0x425350; advances the cursor by +0x10 WITHOUT dt and samples the root
+004633A0	mcCreatureAnimator__ctor	manual	alpha 0x4251A8; puts 1.0 at +0x10/+0x14/+0x18
+00460B48	mcCreature__IntegrateMovement	manual	(graph name was wrong) rotates the root step by the matrix and adds it to the position; writes the delta at +324
+00463418	mcCreatureAnimator__SetPlayBackRate_float_float	manual	alpha 0x425220; THE PLAYBACK RATE in frames per tick. overwrites the ctor
+0045FD70	mcCreature__ApplyAnimRate	manual	3 paths, all pass creature+0x15C and a literal 1.0 to SetRate
+00433958	datTimeManager__SetTempOverSampling_bool_int	manual	alpha 0x3F5B50; the block of the 16-bit round-trip of dt
+0045F588	mcCreature__Init_mcCreatureAnim	manual	alpha 0x421408; builds the rate 1.10+rand*0.35 and calls SetPlayBackRate
+00463400	mcCreatureAnimator__SetAnimation	manual	alpha 0x425208; copies +0x14 -> +0x10
+00463470	mcCreatureAnimator__SwitchToAnimation	manual	alpha 0x425278
+004634B0	mcCreatureAnimator__GetCurrTransDiff	manual	alpha 0x4252B8; the translation difference
+004637D0	mcCreatureAnimator__SetToPredictedFrameData	manual	alpha 0x4255D8; copies +0x18 -> +0x10
+00561378	mcCityEnvMap__ctor	manual	initialises the fields, but Initialize rewrites almost all of them; only +0x0C survives
+00561540	mcCityEnvMap__Initialize	manual	REAL values: size 0x56157C/588/598, FOV 0x561668(garage)/0x5616B8(city), intensity +0xB8 0x561658/694/6A8
+00562530	mcCityEnvMap__SetupCam	manual	Perspective(fov=+0x40, aspect, near=0.25 literal 0x562580, far=1000 literal 0x562588)
+001D6978	mcSpotlight__initStaticData	manual	CreateRenderTarget(width, height, format, VRAM ADDRESS); targets at fixed VRAM 0 / 0x2000 / 0x102000 - only the width is patchable
+0052C010	gfxTexture__CreateRenderTarget	manual	signature (int width, int height, uint format, uint vramAddress) - the 4th arg is a raw address in GS VRAM
+002F7800	rmcCarModel__SetTaillightVal_short_const__ptr__float	manual	Consumes rmcCarModelType+0x2C local index tlights_on
+002F77A8	rmcCarModel__SetBrakelightVal_short_const__ptr__float	manual	Consumes rmcCarModelType+0x2E local index blights_on plus third brake and colored glass
+002FC2D8	rmcCarModel::UpdateExhaustDamagePos(void)	manual	Indexes rmcCarModelType+0xE8 by mcCarCustom rear bumper +0x118C and exhaust side
+002FC678	rmcCarModel::UpdateExhaustShake(void)	manual	Cross-build exact size and adjacency; updates the same two exhaust matrices
+002EFDE8	mcCarParticles__DrawEngineFire_bool	manual	alpha MC.MAP 0x2F89F8; reads type+0x3154[2] engine_smk anchors
+002FA650	rmcCarModel__UpdateTrunk_void	manual	alpha MC.MAP 0x2DF730; reads fixed trunk node type+0x2D9C
+00301908	carWindowDamage__dtor_carWindowDamage_void	manual	vtable 0x627FF8 and alpha MC.MAP 0x2E75A8
+00301958	carWindowDamage__FileIO_datParser__ref	manual	vtable 0x627FF8 and alpha MC.MAP 0x2E75D0; corrects string-fingerprint collision with aiAmbientWindowDamage
+003C38C8	drwShaderDistort__Load_char_const__ptr__char_const__ptr_const__ptr__int_rmcShaderGroup__ref	manual	MC.MAP alpha graph and retail vtable 0x62E588
+003C3A10	drwShaderDistort__Draw_rmcModel_const__ref__rmcShaderData_const__ptr__int_int_const	manual	MC.MAP alpha graph and retail vtable 0x62E588
+003C3AB0	drwShaderDistort__Bind_rmcShaderData_const__ptr__rmcShaderData_const__ptr__int_const	manual	MC.MAP alpha graph and retail vtable 0x62E588
+003C0598	drwShaderRiderChrome__Load_char_const__ptr__char_const__ptr_const__ptr__int_rmcShaderGroup__ref	manual	MC.MAP alpha source order and chrome Fresnel implementation
+003C05C8	drwShaderRiderChrome__DrawSkinned_rmcModel_const__ref__rmcShaderData_const__ptr__int_Matrix34_const__ptr__int_int_const	manual	MC.MAP alpha source order and chrome Fresnel implementation
+003B2038	drwShaderModel__LoadBoneTags_rmcTypeFileCbData__ptr	manual	registered by PreLoadBonetags; inserts tag -> index+1
+00456CC0	crAnimation__InitHashTables_void	manual	corrected graph mismatch; alpha MC.MAP 0x419270 and neighboring symbols
+003BB070	drwShaderCarDecalChrome__Draw_rmcModel_const__ref__rmcShaderData_const__ptr__int_int_const	manual	vtable 0062F418 slot 10; verified field accesses and chrome two-pass draw
+005E9610	vu_pointlight_ci	manual	overlay id + consumer rmcSetCpvMode
+005EC4F0	vu_pointlight_dc	manual	overlay id + consumer rmcSetCpvMode
+005EF9A0	vu_DrawInst	manual	overlay id + consumer mcInstBucket::Draw
+005EFD40	vu_shadowvu1	manual	.DVP overlay id identical to the alpha's + block size matches
+005F1390	vu_ptxDrawUcode	manual	overlay id + consumer ptxMicrocode
+005F29C0	vu_occludeTestBound	manual	overlay id + consumer mcOccluderSystem::PrepOccluders_VU0
+005F2D10	vu_noise_cn_lighttexgen_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+005F5DA0	vu_noise_cn_pointlight_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+005F8ED0	vu_noise_pointlight_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+005FBF00	vu_skinned_fresnel	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+005FE010	vu_specular2_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750; does NOT exist in the alpha
+00600210	vu_texgen_fresnel_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+00602290	vu_carbon_fiber_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750; does NOT exist in the alpha
+00604640	vu_carpaint_3pass_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+00606B00	vu_city_reflect_ci	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+00609860	vu_cpv_distort_vtx_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+0060C890	vu_distort_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+0060E9A0	vu_light_texgen_dc	manual	verified through rmcShader::AddMicrocode in mcTextureFactory::mcTextureFactory 3B5750
+00610A60	vu_rv1_code_main	manual	overlay id + consumer lowPsxGfx::DoMicrocode
+00612010	vu_rv1_code	manual	overlay id + consumer lowPsxGfx::DoMicrocode and MainMicrocode+0
+00613FB0	vu_rv1_code_drawptx	manual	overlay id + consumer gfxPointSpriteBegin and MainMicrocode+4
