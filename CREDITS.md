@@ -6,6 +6,10 @@ else's work, it says so in its own header too.
 
 ## Code and data carried into this kit
 
+- **SaltySasha** - got HostFS working for the game. The HostFS support this
+  kit relies on (booting from `host0:` with the assets as loose files, which
+  every tool that reads from or writes to `$MC3_HOSTFS` depends on) grew out of
+  that patch.
 - **AlgumCorrupto (Paulo)** - the FreeCam of *CinematicClub*, ported to the
   modloader as `mods/freecam` (GPL-3.0, licence in `mods/freecam/LICENSE.md`
   and `tools/freecam_input/LICENSE.md`); the *RAGE-SWF-research* and
