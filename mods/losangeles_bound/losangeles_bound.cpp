@@ -39,6 +39,7 @@
 // -----------------------------------------------------------------------------
 #include "../../payload/mc3_mod.h"
 #include "../../payload/mc3_heap.h"
+#include "../mc2_city_config.h"
 
 enum {
     BOUND_LOAD_CALL = 0x001A937C,     // jal 0x42E810 in mcLayerCity::InitPhys
@@ -48,7 +49,6 @@ enum {
     ASSET_MANAGER = 0x006D557C,       // datAssetManager*; vtable +36 = Open
     ASSET_EXT_PCK = 0x00618D8C,       // the extension LoadBuild passes
     RACE_CONFIG_CURRENT = 0x00619B10, // mcRaceConfig*; +0 = city index
-    LOSANGELES_INDEX = 5,
     STREAM_OPEN = 0x003991F0,
     STREAM_READ = 0x003993A8,
     STREAM_SEEK = 0x003996C0,
@@ -70,6 +70,8 @@ enum {
     QUAD_MAX = 2000,                  // phQuadtreeCell::ClassInit(2000,2000)
     MAX_CELLS = 64,
     MAX_HANDLES = 32,
+    MAX_SOLID = 256,                  // instance boxes added as walls (pillars)
+    HOOD_CHUNK = 4096,
     HEAP_MARGIN = 0x40000,
     CHUNK = 0x10000,
 };
@@ -166,6 +168,10 @@ struct Build {
     // cache of PMT0 handle -> global material id
     mc3_u32 handle[MAX_HANDLES], global[MAX_HANDLES], handles;
     mc3_u32 err_stage, err_detail;
+    // world boxes of the instances made solid (solid_instances): lo xyz, hi xyz
+    float solid[MAX_SOLID][6];
+    mc3_u32 solids, hoods;
+    char line[HOOD_CHUNK + 256];
 };
 static Build g_build;
 // every access through this: GCC otherwise shares one lui between accesses,
@@ -440,6 +446,167 @@ static int load_skeleton(mc3_u8 *body) {
     return 1;
 }
 
+
+// ------------------------------------------------------------------ pillars
+// MC2's city collision has no freeway supports: l_inst_freeway_support_01x
+// (52 in LA, 1.4 x 6.3 x 2.7 m, always at 0/90 degrees) is an instance, and
+// the otgrid only holds three buried stubs at its foot - a car drove straight
+// through every pillar under the freeways. Each such instance of the .hood
+// files (copied by the installer, host0:/mc2/losangeles/city/) becomes four
+// walls from its world box (emin/emax), appended to the type 9 geometry
+// before the octree is built. Marker RBN5 <boxes> <hoods read>.
+static mc3_u32 current_city(void);
+static __attribute__((noinline)) const char *city_dir() {
+    return mc2_city_dir(current_city());
+}
+static __attribute__((noinline)) const char *lvl_file() {
+    return mc2_city_lvl(current_city());
+}
+static __attribute__((noinline)) const char *hood_ext() {
+    static const char s[] = ".hood"; return s;
+}
+static __attribute__((noinline)) const char *solid_type() {
+    return mc2_city_solid_type(current_city());
+}
+static __attribute__((noinline)) const char *kw_instance() {
+    static const char s[] = "instance_component"; return s;
+}
+static __attribute__((noinline)) const char *kw_type() { static const char s[] = "type:"; return s; }
+static __attribute__((noinline)) const char *kw_name() { static const char s[] = "name:"; return s; }
+static __attribute__((noinline)) const char *kw_emin() { static const char s[] = "emin"; return s; }
+static __attribute__((noinline)) const char *kw_emax() { static const char s[] = "emax"; return s; }
+static int starts_with(const char *p, const char *w) {
+    while (*w) if (*p++ != *w++) return 0;
+    return 1;
+}
+static float parse_f(const char **pp) {
+    const char *p = *pp;
+    while (*p == ' ' || *p == '\t') ++p;
+    int neg = 0;
+    if (*p == '-') { neg = 1; ++p; }
+    float v = ffrom(0u);
+    while (*p >= '0' && *p <= '9') v = v * ffrom(0x41200000u) + (float)(*p++ - '0');
+    if (*p == '.') {
+        ++p;
+        float f = ffrom(0x3DCCCCCDu);
+        while (*p >= '0' && *p <= '9') { v += f * (float)(*p++ - '0'); f *= ffrom(0x3DCCCCCDu); }
+    }
+    *pp = p;
+    return neg ? -v : v;
+}
+// Calls line(text, arg) for every line of a HostFS text file.
+static int each_line(const char *path, void (*line)(char *, char *), char *arg) {
+    const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(path, STREAM_RAW);
+    if (!h) return 0;
+    char *b = G()->line;
+    mc3_u32 have = 0;
+    for (;;) {
+        const int got = MC3_CALL3(int, STREAM_READ, mc3_u32, void *, int)
+            (h, b + have, (int)(HOOD_CHUNK - have));
+        if (got > 0) have += (mc3_u32)got;
+        mc3_u32 start = 0;
+        for (mc3_u32 i = 0; i < have; ++i) {
+            if (b[i] != '\n') continue;
+            b[i] = 0;
+            line(b + start, arg);
+            start = i + 1u;
+        }
+        if (got <= 0) {                                  // last line without '\n'
+            if (start < have) { b[have] = 0; line(b + start, arg); }
+            break;
+        }
+        for (mc3_u32 i = start; i < have; ++i) b[i - start] = b[i];
+        have -= start;
+        if (have >= HOOD_CHUNK) have = 0;                // absurd line: drop it
+    }
+    close_stream(h);
+    return 1;
+}
+// .hood line; arg[0] = 1 while inside a wanted instance_component
+static void hood_line(char *l, char *arg) {
+    while (*l == ' ' || *l == '\t') ++l;
+    if (starts_with(l, kw_instance())) { arg[0] = 0; return; }
+    if (starts_with(l, kw_type())) {
+        const char *p = l + 5;
+        while (*p == ' ' || *p == '\t') ++p;
+        const char *w = solid_type();
+        int same = 1;
+        while (*w) if (*p++ != *w++) { same = 0; break; }
+        if (same && (*p == 0 || *p == ' ' || *p == '\r' || *p == '\t')) arg[0] = 1;
+        return;
+    }
+    if (!arg[0] || G()->solids >= MAX_SOLID) return;
+    const int lo = starts_with(l, kw_emin()), hi = starts_with(l, kw_emax());
+    if (!lo && !hi) return;
+    const char *p = l + 4;
+    float *box = G()->solid[G()->solids];
+    for (int k = 0; k < 3; ++k) box[(hi ? 3 : 0) + k] = parse_f(&p);
+    if (hi) { ++G()->solids; arg[0] = 0; }
+}
+static void join(char *out, const char *a, const char *b, const char *c) {
+    while (*a) *out++ = *a++;
+    while (*b) *out++ = *b++;
+    while (c && *c) *out++ = *c++;
+    *out = 0;
+}
+// .lvl line: "name: <hood>" -> read that hood. The .lvl itself is read first
+// into a small list, because each_line shares one buffer.
+static void lvl_line(char *l, char *names) {
+    while (*l == ' ' || *l == '\t') ++l;
+    if (!starts_with(l, kw_name())) return;
+    char *n = l + 5;
+    while (*n == ' ' || *n == '\t') ++n;
+    mc3_u32 len = 0;
+    while (n[len] && n[len] != ' ' && n[len] != '\r' && n[len] != '\t' && len < 31u) ++len;
+    mc3_u32 at = 0;
+    while (names[at]) at += 32u;                   // next free 32-byte slot
+    if (at >= 32u * 31u) return;
+    for (mc3_u32 i = 0; i < len; ++i) names[at + i] = n[i];
+    names[at + len] = 0;
+}
+static void solid_instances() {
+    G()->solids = G()->hoods = 0;
+    char names[32 * 32];
+    for (mc3_u32 i = 0; i < sizeof(names); ++i) names[i] = 0;
+    char path[128];
+    join(path, city_dir(), lvl_file(), 0);
+    each_line(path, lvl_line, names);
+    for (mc3_u32 at = 0; at < sizeof(names) && names[at]; at += 32u) {
+        join(path, city_dir(), names + at, hood_ext());
+        char state[4] = { 0, 0, 0, 0 };
+        if (each_line(path, hood_line, state)) ++G()->hoods;
+    }
+    mark('R','B','N','5', G()->solids, G()->hoods);
+}
+// Four walls of box b: 8 vertices at vb.. (bottom 0-3, top 4-7: x0z0 x1z0
+// x1z1 x0z1) and 4 quads. Corner order as MC2's own walls: from a to b along
+// up x normal, then a top, a bottom, b bottom, b top.
+static void write_box(const float *b, mc3_u8 *verts, mc3_u8 *polys, mc3_u32 vb) {
+    for (int k = 0; k < 8; ++k) {
+        const int c = k & 3;
+        wrf(verts + 12u * k, (c == 1 || c == 2) ? b[3] : b[0]);
+        wrf(verts + 12u * k + 4u, k < 4 ? b[1] : b[4]);
+        wrf(verts + 12u * k + 8u, c >= 2 ? b[5] : b[2]);
+    }
+    const float h = b[4] - b[1];
+    for (int w = 0; w < 4; ++w) {
+        // +z at z1 (x0->x1), -z at z0 (x1->x0), +x at x1 (z1->z0), -x at x0 (z0->z1)
+        const int nx = w == 2 ? 1 : w == 3 ? -1 : 0;
+        const int nz = w == 0 ? 1 : w == 1 ? -1 : 0;
+        const mc3_u32 a = w == 0 ? 3u : w == 1 ? 1u : w == 2 ? 2u : 0u;
+        const mc3_u32 c = w == 0 ? 2u : w == 1 ? 0u : w == 2 ? 1u : 3u;
+        mc3_u8 *p = polys + 32u * w;
+        wrf(p + 0, (float)nx); wrf(p + 4, ffrom(0u)); wrf(p + 8, (float)nz);
+        const float len = nx ? b[5] - b[2] : b[3] - b[0];
+        wrf(p + 12, len * h);
+        p[12] = 0;                                   // material slot 0 (low byte of the area)
+        mc3_u16 *idx = (mc3_u16 *)(p + 16);
+        idx[0] = (mc3_u16)(vb + 4u + a); idx[1] = (mc3_u16)(vb + a);
+        idx[2] = (mc3_u16)(vb + c);      idx[3] = (mc3_u16)(vb + 4u + c);
+        idx[4] = idx[5] = idx[6] = idx[7] = 0xFFFFu;
+    }
+}
+
 // ------------------------------------------------------------------ main
 static int find_bnd0(Source *grid, Source *quad) {
     mc3_u8 hdr[8] __attribute__((aligned(16)));
@@ -466,8 +633,9 @@ static int find_bnd0(Source *grid, Source *quad) {
 }
 
 static mc3_u32 build_body(mc3_u32 *out_size) {
-    static const char rsc_path[] = "host0:/mc2/losangeles/losangeles.rsc";
     static const char tokyo_name[] = "$/resources/city/tokyo_bnd";
+    const char *const rsc_path = mc2_city_rsc(current_city());
+    if (!rsc_path) return fail(0x01, 0);
     G()->rsc = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(rsc_path, STREAM_RAW);
     if (!G()->rsc) return fail(0x01, 0);
     G()->tokyo = open_asset(tokyo_name);
@@ -496,6 +664,9 @@ static mc3_u32 build_body(mc3_u32 *out_size) {
         if (rd32(ch + 0x84) == 0xFFFFFFFFu) continue;
         nv9 += rd32(ch + 0x4C); np9 += rd32(ch + 0x50);
     }
+    solid_instances();
+    const mc3_u32 grid_v = nv9, grid_p = np9;
+    nv9 += G()->solids * 8u; np9 += G()->solids * 4u;
     if (!np9 || nv9 > 0xFFFFu) return fail(0x19, nv9);
 
     // layout: skeleton | polys10 verts10 polys9 verts9 | idx10 blocks10 idx9 blocks9
@@ -510,8 +681,9 @@ static mc3_u32 build_body(mc3_u32 *out_size) {
     const mc3_u32 cap = trees + align16(max_refs10 * 2u) + max_blocks10 * 32u +
                         align16(max_refs9 * 2u) + max_blocks9 * 48u + 64u;
     const mc3_u32 scratch_bytes = np9 * 6u + 4096u;
-    if (mc3_heap_free(mc3_heap_active()) < cap + scratch_bytes + 256u + HEAP_MARGIN)
-        return fail(0x04, cap + scratch_bytes);
+    // largest free block, not only the cursor-top gap (see mc3_heap_largest)
+    if (mc3_heap_largest(mc3_heap_active()) < cap + 256u + HEAP_MARGIN)
+        return fail(0x04, mc3_heap_largest(mc3_heap_active()));
     mc3_u8 *body = (mc3_u8 *)MC3_CALL2(mc3_u32, ALIGNED_NEW, mc3_u32, mc3_u32)(cap, 128u);
     if (!body) return fail(0x05, cap);
     G()->body = body; G()->body_cap = cap;
@@ -533,10 +705,15 @@ static mc3_u32 build_body(mc3_u32 *out_size) {
                        vb, body + MAT9, MAT9_COUNT)) return 0;
         vb += rd32(ch + 0x4C); pb += rd32(ch + 0x50);
     }
+    if (vb != grid_v || pb != grid_p) return fail(0x1A, vb);
+    for (mc3_u32 i = 0; i < G()->solids; ++i, vb += 8u, pb += 4u)
+        write_box(G()->solid[i], body + verts9 + vb * 12u, body + polys9 + pb * 32u, vb);
     close_stream(G()->rsc); G()->rsc = 0;
     close_stream(G()->tokyo); G()->tokyo = 0;
 
     // trees
+    if (mc3_heap_largest(mc3_heap_active()) < scratch_bytes + 64u + HEAP_MARGIN)
+        return fail(0x06, mc3_heap_largest(mc3_heap_active()));
     mc3_u8 *scratch = (mc3_u8 *)MC3_CALL2(mc3_u32, ALIGNED_NEW, mc3_u32, mc3_u32)(scratch_bytes, 16u);
     Tree t10, t9;
     init_tree(&t10, body + verts10, body + polys10, np10, 4u, PROF10, POR10, scratch, scratch_bytes);
@@ -583,7 +760,7 @@ static __attribute__((noinline)) mc3_u32 current_city(void) {
 }
 
 extern "C" mc3_u32 bound_load_hook(mc3_u32 path, mc3_u32 type, mc3_u32 out1, mc3_u32 out2) {
-    if (current_city() == LOSANGELES_INDEX && type == 9u) {
+    if (mc2_city_supported(current_city()) && type == 9u) {
         G()->rsc = G()->tokyo = 0; G()->body = 0; G()->handles = 0;
         G()->err_stage = G()->err_detail = 0;
         mc3_u32 size = 0;

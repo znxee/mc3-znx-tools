@@ -17,12 +17,12 @@
 // -----------------------------------------------------------------------------
 
 #include "../../payload/mc3_mod.h"
+#include "../mc2_city_config.h"
 
 enum {
     PAGE_POOL_CALL = 0x001A94A4,        // jal 0x42EA90 inside mcLayerCity
     PAGE_POOL_CREATE = 0x0042EA90,
     RACE_CONFIG_CURRENT = 0x00619B10,   // mcRaceConfig*; +0 = city index
-    LOSANGELES_INDEX = 5,
     LOSANGELES_PAGES = 8,
 };
 
@@ -49,7 +49,7 @@ extern "C" mc3_u32 page_pool_hook(mc3_u32 page, mc3_u32 extra, mc3_u32 count,
     const mc3_u32 city = cfg >= 0x00100000u && cfg < 0x02000000u
         ? *(volatile mc3_u32 *)cfg : 0xFFFFFFFFu;
     const mc3_u32 asked = count;
-    if (city == LOSANGELES_INDEX && count > LOSANGELES_PAGES) count = LOSANGELES_PAGES;
+    if (mc2_city_supported(city) && count > LOSANGELES_PAGES) count = LOSANGELES_PAGES;
     put('R'); put('P'); put('P'); put('L'); put(' ');
     hex8((city << 16) | (asked & 0xFFFFu)); put(' '); hex8(count); put('\n');
     return MC3_CALL5(mc3_u32, PAGE_POOL_CREATE, mc3_u32, mc3_u32, mc3_u32,

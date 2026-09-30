@@ -10,7 +10,10 @@ the packets come out with different indices, silently: measured, same model,
 same size, different checksum.
 
 The palette is inline in the city's own .pck, at MapRoot+0x290 (file offset
-0x310), 256 entries of Vector4 float (r, g, b, 0). Every retail city has
+0x310), 256 entries of Vector4 float (r, g, b, a). The alpha is 0 in entries
+0..7 and 1.0 in 8..255, and entry 255 is always opaque white, in every retail
+city and condition - whoever draws later with the city palette still resident
+(the checkpoint smoke column) uses that alpha. Every retail city has
 +0x2C = 0x06800290 pointing at it. A second one sits at +0x1290.
 
 AND IT IS PER CONDITION, not just per city: Atlanta's entry 1 is

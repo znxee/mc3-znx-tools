@@ -48,6 +48,11 @@ the finding behind the tool, and `python TOOL.py --help` lists its options.
   through mc3boot's `mods/build_mod.sh`: copy a module folder from `mods/` into
   `$MC3BOOT/mods/` and run `sh build_mod.sh NAME [HostFS dir]` there. The
   modules include `../../payload/mc3_mod.h`, which lives in mc3boot.
+- The MC2 city modules (`city_mc2_rsc_draw_test`, `city_paris_slot7`,
+  `losangeles_*`, `mc2_aib_compat`) share `mods/mc2_city_config.h` (per-city
+  table for Los Angeles and Paris): copy it into `$MC3BOOT/mods/` next to the
+  module folders. They also need an mc3boot payload whose `mc3_heap.h` has
+  `mc3_heap_largest()`.
 - `audio/mc3_music_core.py` also needs Edness's `MclHash.py` and `strtbl.py`
   on the Python path; they are not redistributed here.
 - Optional external programs: PCSX2 (with PINE enabled for the live tools),
@@ -75,6 +80,7 @@ command line.
 | `MC2_PS2_ASSETS` | Midnight Club 2 PS2 `assets` folder |
 | `MC3_ISO_SOURCE` | the folder `mc3_build_iso_assets.py` builds `ASSETS.DAT` from |
 | `MC3_WORK` | a scratch/work folder some research scripts read from and write to |
+| `MC3_STRTBL` | Edness's `strtbl.py` (not redistributed), for the tools that edit the game's string tables: `mc2_races_to_mc3.py`, `mc2_race_modes.py`, `mc3_rename_city.py` |
 | `MC3_RIM_IMPORTER` | folder of the (separate) Rim Importer & Explorer, for the hub |
 
 Generated files go to `tools/output/` (see `tools/mc3_output.py`), which is

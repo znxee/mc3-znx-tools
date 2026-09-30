@@ -310,6 +310,52 @@ TOOLS = [
         ),
     ),
     dict(
+        name='MC2 races and modes',
+        script='mc2_races_to_mc3.py',
+        gui=False,
+        summary="Install an MC2 city's races into its MC3 slot, plus MC3-only modes built from them.",
+        opens=['.rac', '.loc'],
+        detail=(
+            'python mc2_races_to_mc3.py --mc2-city losangeles\n'
+            'python mc2_races_to_mc3.py --mc2-city losangeles --add-types capture_the_flag,bomb_tag\n'
+            'python mc2_race_modes.py --city losangeles\n'
+            'python mc2_race_shortcut.py --city paris --race NAME --leg A B\n'
+            '\n'
+            "Reads the user's own MC2 PS2 races and writes MC3 .rac/.rinf, the .loc and\n"
+            '.locinf entries and the menu and loading-screen strings (mcstrings01 and\n'
+            "mcloadstrings). MC2's bomb_tag is MC3's Detonator. --add-types only APPENDS,\n"
+            'so hand-fixed races survive. mc2_race_modes builds Tag and Paint from the\n'
+            'Capture the Flag arenas and Frenzy from the longest ordered races.\n'
+            'mc2_race_shortcut injects AI shortcuts that follow the road network.'
+        ),
+    ),
+    dict(
+        name='MC2 city occluders',
+        script='mc2_occluders.py',
+        gui=False,
+        summary='Generate an MC3 .occlude for an MC2 city, so lights and cars stop showing through walls.',
+        opens=['.rsc'],
+        detail=(
+            'python mc2_occluders.py --city losangeles --out losangeles.occlude --png la.png\n'
+            '\n'
+            "Boxes from MC2's own collision (BND0) and rendered buildings, flood-filled\n"
+            'from the road network; boxes touching a lane are dropped.'
+        ),
+    ),
+    dict(
+        name='Rename an added city',
+        script='mc3_rename_city.py',
+        gui=False,
+        summary='Rename an added MC3 city in paths, text files, mc3boot.ini and string tables.',
+        opens=[],
+        detail=(
+            'python mc3_rename_city.py --old OLD --new NEW --dry-run\n'
+            '\n'
+            "The city's MC3 name is the key every asset path is built from; no .pck or\n"
+            '.ppf stores it. Rebuild the registry module (city_paris_slot7) with NEW.'
+        ),
+    ),
+    dict(
         name="Symbols (alpha -> retail)",
         script="mc3_symbols.py",
         gui=False,

@@ -1,57 +1,15 @@
 // -----------------------------------------------------------------------------
-//  city_capacity_test - can the city TABLE hold more than six records?
+//  city_paris_slot7 - register Paris as city index 6.
 //
-//  city_slot6.mod answered "is there a spare slot" - yes, retail already
-//  allocates six records and only fills five, and registering the sixth is
-//  five stores into memory the game already walks every boot. This mod asks
-//  the next question: can the table itself be made to hold SEVEN, i.e. does
-//  the six-slot capacity generalise, or is six baked in everywhere that
-//  matters?
+//  Retail allocates six city records but registers only five.  Paris needs a
+//  seventh record, so eight guarded MIPS immediates grow the allocation,
+//  constructor/default-load loops and all four measured lookup bounds from 6
+//  to 7.  The final bound at 0x004B79D8 belongs to mc::LoadCityData; omitting
+//  it leaves a visually registered Paris with zero races.
 //
-//  WHAT "SIX" ACTUALLY IS
-//
-//  Not a constant read from memory - six literal immediates inside the game's
-//  own code, at 0x004B7600 (mc::mcCityData table builder) and three lookup
-//  functions. Measured directly from the ELF, each a one-word MIPS
-//  addiu/slti:
-//
-//      004B7604  addiu $a0, $zero, 0x1D8   new[] size  = 16 + 6*76
-//      004B763C  addiu $v1, $zero, 6       new[] cookie (element count)
-//      004B7618  addiu $s1, $zero, 5       construct 6 objects (5 downto -1)
-//      004B775C  addiu $s0, $zero, 5       mc::LoadDefaultCityData walks 0..5
-//      004B93B8  slti  $v0, $s0, 6         mc::LookupCity search bound
-//      004B95F8  slti  $v0, $s0, 6         mc::LookupRace search bound
-//      004BE75C  slti  $v0, $s0, 6         mcRaceConfig::SetCity search bound
-//
-//  Rewriting these seven words to build for SEVEN records and search up to
-//  index 6 is the whole mechanism - same self-modifying-constant technique
-//  draw_distance.mod already uses on GetLODDist, done here on code the game
-//  is about to execute rather than a value it is about to read.
-//
-//  WHY THE NEW SLOT IS LEFT EMPTY - this is the important part
-//
-//  This mod registers "losangeles" into slot 5 exactly as city_slot6.mod does,
-//  and does NOT put anything in the new slot 6. That is deliberate: patching
-//  the constants above only proves the REGISTRY can be seven long. Whether
-//  the rest of the game tolerates a seventh city is a much bigger question -
-//  99 instructions across 55 functions read the table's base pointer,
-//  spanning career progression, the knowledge base, rewards and side quests,
-//  and about half of those functions carry no name in this project's symbol
-//  work. Auditing each of them was out of scope for this question.
-//
-//  So this is the minimal, additive experiment: does the capacity patch alone
-//  - nobody claiming the new slot - survive a normal boot to the frontend? If
-//  it does, that is evidence the wider systems either don't care about the
-//  array's length or read it correctly rather than assuming six; it is not
-//  proof every one of the 55 is safe. If it does NOT survive, that already
-//  answers the question, and cheaply.
-//
-//  The seventh slot, once the patched constructor loop runs, is a genuinely
-//  well-formed "not_initialized" mcCityData object - the same shape slot 5
-//  was in before city_slot6.mod ever touched it, and the same shape
-//  mc::LoadDefaultCityData already walks into every boot for real. Nothing
-//  about leaving it empty is untested territory on its own; only the fact
-//  that it is record SIX rather than five is new.
+//  Slot 5 remains losangeles/Los Angeles.  Slot 6 is registered as paris/p with
+//  its seven MC3 shell hoods.  Runtime markers prove both registration and the
+//  post-load race counts (CCR5/CCR6); Paris currently reports 0x18 entries.
 //
 //  CANNOT COEXIST WITH city_slot6.mod: both want the same two hook sites
 //  (0x001A0F40, 0x001A12E0), and a second install would silently replace the
@@ -69,9 +27,9 @@ enum {
     LOAD_DEFAULT_CITY_DATA = 0x004B7750,
     CITY_STRIDE            = 76,
 
-    CITY_SLOTS_NEW = 7,     // the experiment
+    CITY_SLOTS_NEW = 7,
     CITY_LOSANGELES      = 5,     // losangeles, exactly as city_slot6.mod
-    CITY_PARIS     = 6,     // the new slot - deliberately left empty
+    CITY_PARIS     = 6,
 
     NOT_INITIALIZED = 0x0066A492,
     FLUSH_CACHE     = 0x00546C20,
@@ -92,11 +50,12 @@ static __attribute__((noinline)) const capacity_patch *patches()
         { 0x004B93B8u, 0x2A020006u, 0x2A020007u },  // LookupCity bound
         { 0x004B95F8u, 0x2A020006u, 0x2A020007u },  // LookupRace bound
         { 0x004BE75Cu, 0x2A020006u, 0x2A020007u },  // SetCity bound
+        { 0x004B79D8u, 0x2A620006u, 0x2A620007u },  // LoadCityData bound
     };
     return p;
 }
 
-enum { PATCH_COUNT = 7 };
+enum { PATCH_COUNT = 8 };
 
 struct cap_state {
     mc3_u32 patched;
@@ -107,7 +66,7 @@ struct cap_state {
 static cap_state g_state;
 static __attribute__((noinline)) cap_state *st(void) { return &g_state; }
 
-// Rewrites the seven words. Stops at the first mismatch rather than patching
+// Rewrites the guarded words. Stops at the first mismatch rather than patching
 // some and not others - a half-patched allocator is worse than an unpatched
 // one.
 static void apply_capacity_patch(void)
@@ -139,8 +98,7 @@ struct city_def {
     const char *hoods[12];
 };
 
-// Same content city_slot6.mod registers - this experiment is about capacity,
-// not about a different city, so slot 5 stays exactly what was already proved.
+// Keep slot 5 identical to the already-proved city_slot6 registration.
 static const city_def g_losangeles = {
     "losangeles", "m", 12,
     { "m_bh",  "m_dt",  "m_gh",  "m_hl",  "m_hw",  "m_i05",
@@ -165,7 +123,7 @@ extern "C" void mc3_city_paris_slot7(void)
     // Patch the constants BEFORE the code that reads them runs. The registry
     // builder self-modifies its own future execution.
     apply_capacity_patch();
-    sio_word(67, 67, 80, 84, s->patched);          // CCPT <7 if all patched>
+    sio_word(67, 67, 80, 84, s->patched);          // CCPT <8 if all patched>
     if (s->refused_at) {
         sio_word(67, 67, 78, 71, s->refused_at);   // CCNG <address that refused>
         return;                                     // do not run an unpatched
@@ -230,12 +188,8 @@ extern "C" void mc3_city_paris_slot7_after_load(void)
     if (!s->base)
         return;
 
-    // The race count at +0x14, for slot 5 and for the extra slot 6. Slot 5
-    // should read 1, matching city_slot6.mod's proven result. Slot 6 should
-    // read 0 - LoadDefaultCityData tried "tune/race/not_initialized.loc" for
-    // it exactly as it already does today for any unclaimed record, and there
-    // is no such file, so nothing loads. A non-zero here would be the actual
-    // surprise.
+    // Race counts at +0x14 after LoadDefaultCityData.  A valid Paris install
+    // reports 0x18 (one standard Cruise and 23 converted MC2 races).
     const mc3_u32 slot5 = s->base + (mc3_u32)(CITY_LOSANGELES * CITY_STRIDE);
     const mc3_u32 extra = s->base + (mc3_u32)(CITY_PARIS * CITY_STRIDE);
     sio_word(67, 67, 82, 53, *(volatile mc3_u32 *)(slot5 + 0x14));  // CCR5

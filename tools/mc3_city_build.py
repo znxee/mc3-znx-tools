@@ -1339,6 +1339,18 @@ def palette_from_mc2(cpvs_path):
     raise SystemExit('%s has no CPP0' % os.path.basename(cpvs_path))
 
 
+# The palette ALPHA is not decoration. In the four retail cities (atlanta,
+# detroit, sd, tokyo; every condition checked) entries 0..7 have alpha 0,
+# entries 8..255 alpha 1.0, and entry 255 is always opaque white (1,1,1,1) -
+# the entry rmcCpvPalette::Lookup 0x2ACE68 reserves. The city leaves its palette
+# resident on VU1 (mcCityModelClass::SetRenderStates downloads MCCITY+0x2C), and
+# whoever draws later with rmcSetCpvMode(1, 0) without downloading its own
+# inherits it: the checkpoint smoke column (mcCheckpoint::Draw, cp_flare*
+# shaders, texcombine modulate + blendset normal) gets vertex alpha 0 and
+# vanishes. With alpha 0 in all 256 entries that is exactly what the MC2 maps did.
+PALETTE_ZERO_ALPHA = 8      # entries 0..7: alpha 0, as retail
+
+
 def grey_palette():
     """256 Vector4 entries - the table the per-vertex byte indexes."""
     out = bytearray()
@@ -1348,7 +1360,9 @@ def grey_palette():
         else:
             c = (i / 255.0) if PALETTE_RAMP else 1.0
             r = g = b = c
-        out += struct.pack('<4f', r, g, b, 0.0)
+        if i == 255:
+            r = g = b = 1.0
+        out += struct.pack('<4f', r, g, b, 0.0 if i < PALETTE_ZERO_ALPHA else 1.0)
     return bytes(out)
 
 

@@ -1,0 +1,22 @@
+{
+  "groups": [
+    {
+      "anchor_model": "l_hills_observatory_01x#geom",
+      "lateral": -30.0,
+      "forward": 120.0,
+      "models": ["l_hills_observatory_01x#geom"]
+    },
+    {
+      "anchor_model": "l_downtown_blk_librarypark_x#geom",
+      "lateral": 30.0,
+      "forward": 120.0,
+      "models": [
+        "l_downtown_blk_librarypark_x#geom",
+        "l_downtown_rd_38_x#geom",
+        "l_downtown_int_11_x#geom",
+        "l_downtown_int_12_x#geom",
+        "l_downtown_blk_firstintrstate_x#geom"
+      ]
+    }
+  ]
+}

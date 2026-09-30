@@ -3,6 +3,7 @@
 #include "../../payload/mc3_mod.h"
 #include "../../payload/mc3_bootargs.h"
 #include "../../payload/mc3_heap.h"
+#include "../mc2_city_config.h"
 
 enum {
     SET_CAMERA_HOOK = 0x00257AEC,
@@ -14,6 +15,8 @@ enum {
     STREAM_READ = 0x003993A8,
     STREAM_SIZE = 0x003997A8,
     STREAM_CLOSE = 0x00399748,
+    STREAM_CREATE = 0x003992B0,       // Stream::Create(name) -> Stream* (write)
+    STREAM_WRITE = 0x00399538,        // Stream::Write(stream, data, bytes)
     RSC0 = 0x30435352,
     PMD0 = 0x30444D50,
     VCLQ = 0x514C4356,
@@ -23,8 +26,9 @@ enum {
     RSCM = 0x4D435352,
     RINS = 0x534E4952,
     STREAM_RAW = 1,
-    MAX_PIECES = 1100,          // 1010 in LA; State is part of the .mod
+    MAX_PIECES = 1600,          // 1010 in LA, 1493 in Paris; State is in .mod
     MAX_MODELS = 1024,
+    MAX_CARDS = 256,
     MAX_INSTANCES = 9000,
     MAX_MODEL_PMDS = 4,
     MAX_TEXTURES = 2048,
@@ -80,7 +84,8 @@ enum {
     HOOD_CHUNKS_PER_FRAME = 16,
     STREAM_SEEK = 0x003996C0,
     MAX_PROP_TYPES = 128,
-    MAX_PROPS = 6144,
+    MAX_PROPS = 8192,           // 5695 in LA, 8054 in Paris
+    MAX_DYN_PROPS = 48,
     MAX_PROP_PACKETS = 8,
     MAX_AMB_ENTRIES = 2048,
     PRP0 = 0x30505250,
@@ -88,6 +93,7 @@ enum {
     MATRIX_BYTES = 64,
     VIF_UNPACK_MATRIX = 0x6C04000Cu   // UNPACK V4-32 x4 -> VU 12
 };
+enum { MAX_TOUR_POINTS = 256, MAX_PINS = 128 };
 
 struct Target {
     mc3_u32 pmd;
@@ -132,9 +138,29 @@ struct PropType {
     // LOD 2 (MC2's .pdef: lods 0 and 2) and the template's Far flag
     mc3_u32 far, packets2, pk2_addr[MAX_PROP_PACKETS];
     mc3_u16 pk2_qwc[MAX_PROP_PACKETS], pk2_slot[MAX_PROP_PACKETS];
+    float mass;          // MC2 tune/phys/<name>.phys `mass:` (50 when absent)
+    mc3_u32 fixed;       // heavy (>= 1000 kg): a car does not move it
+    mc3_u32 has_phys;    // a .phys exists (smoke/steam/particle props have none)
+    // losangeles.prop template flags: FixedObject 1 = never moves (poles,
+    // palms, containers), GfxOnly 1 = no collision at all (tunnel lights)
+    mc3_u32 fixed_object, gfx_only, drivable;
+    // a tree or palm: its cull sphere is the canopy (up to 11 m), the car
+    // hits the trunk
+    mc3_u32 trunk;
+};
+// A prop the car has hit: it tips over its base, flies, lands and slides.
+struct DynProp {
+    mc3_u32 index, state;              // state 1 moving, 0 free slot
+    float pos[3], vel[3], axis[3], angle, omega, base_y, rot0[9];
 };
 struct ModelDraw {
     mc3_u32 flags, count, pieces[MAX_MODEL_PMDS];
+};
+// A mark the player put in the world (pins_update): category 1 texture,
+// 2 collision, 3 other; wall = on the wall ahead instead of the ground.
+struct Pin {
+    mc3_u32 category, wall;
+    float pos[3], forward[3], car[3];
 };
 struct State {
     Target targets[MAX_PIECES];
@@ -148,6 +174,19 @@ struct State {
     char hood_names[MAX_HOODS][32];
     mc3_u16 inst_ext[MAX_INSTANCES], inst_hash[INST_HASH];
     mc3_u32 instance_word[MAX_INSTANCES], target_word[MAX_PIECES];
+    mc3_u16 *inst_refl;                     // [MAX_INSTANCES] `_0_refl` PCP0 index + 1, 0 = none
+    mc3_u32 draw_pending, no_defer, defer_marked;   // city drawn after the reflection paste
+    mc3_u32 *refl_chain;                           // [MAX_CPVS_ENTRIES / 32] bit: a `_0_refl` PCP0
+    mc3_u32 palette_refl;                           // CPP0 again, alpha = the road's reflectivity
+    mc3_u32 palette_wet;                            // CPP0 again, alpha = wet_scale() (texture wetness)
+    mc3_u32 force_tcc;                              // texture switches take TCC=1 (wetness pass)
+    mc3_u32 card_model[MAX_MODELS / 32];            // bit: a `*card*` model (MC2's fake reflections)
+    mc3_u16 cards[MAX_CARDS];                       // this frame's visible card instances
+    mc3_u32 card_count;
+    mc3_u16 *later;                                 // [MAX_PIECES + MAX_INSTANCES] this frame's ground draws
+    // (these three are heap blocks taken with the city - refl_tables() - so the
+    // .mod, which is loaded into the heap in every city, stays small)
+    mc3_u32 later_count;
     mc3_u16 comp_pcp[MAX_COMP_PCP];
     mc3_u32 comp_pcp_count, names_ready, map_ready;
     // MC2 props (step_props)
@@ -155,6 +194,23 @@ struct State {
     mc3_u32 prop_type_count, prop_types_ok, prop_count, prop_bad;
     mc3_u32 prop_state, prop_error, prop_reported, props_ready;
     mc3_u32 prop_records, prop_matrices, frame_props;
+    DynProp dyn[MAX_DYN_PROPS];
+    mc3_u32 dyn_next, props_hit, solid_hits, push_brain[4], push_opp[10];
+    // [boot] mc2s spectator camera (spectate)
+    mc3_u32 spec_inst[16], spec_count, spec_frame, spec_current;
+    // mc2s = <N>f: the player's car follows the watched opponent (spectate_follow)
+    mc3_u32 follow_brain[4], follow_opp[10], follow_count;
+    // [boot] mc2t camera tour (camera_tour): points from host0:/mc2_camtour.txt
+    mc3_u32 tour_state, tour_mem, tour_count, tour_frame, tour_shown;
+    float tour[MAX_TOUR_POINTS][6];
+    // [boot] mc2g drop test (drop_test): points from host0:/mc2_droptest.txt
+    mc3_u32 drop_state, drop_mem, drop_points, drop_count, drop_frame, drop_brain[4], drop_opp[10];
+    // player pins (pins_update): "MC2PINS1", count, then the pins - found in
+    // a savestate by the magic (mc3_pins.py)
+    char pin_magic[8];
+    mc3_u32 pin_count, pin_keys, pin_mem, pin_mats, pin_saved;
+    Pin pins[MAX_PINS];
+    mc3_u8 prop_moved[MAX_PROPS];
     mc3_u32 amb_stream, amb_count, amb_bytes, amb_table, amb_dest, slot_of_amb;
     mc3_u32 amb_rnt, amb_rnt_bytes, amb_loaded;
     ModelDraw models[MAX_MODELS];
@@ -191,8 +247,45 @@ struct State {
     mc3_u32 rsc_table_mem, rsc_table, rsc_scratch_mem, rsc_scratch;
     mc3_u32 rsc_error, rsc_reported, load_index;
 };
-static State g_state;
-static __attribute__((noinline)) State *st() { return &g_state; }
+// State lives on the heap, taken when a race in an MC2 city starts
+// (state_acquire) and given back with everything else (release_all). As a
+// static it was ~460 KB of .bss INSIDE the .mod, and core.mod loads a deferred
+// module into the heap on the first frame of EVERY city, reading the file and
+// placing the code as two blocks at once: booted straight into San Diego or
+// Tokyo that asked for 2 x 540 KB on a full heap and stopped the game on
+// "Heap (null) overrun". Outside an MC2 city st() is 0.
+static State *g_state_ptr;
+static mc3_u32 g_state_mem;
+static __attribute__((noinline)) State *st() { return g_state_ptr; }
+static __attribute__((noinline)) State **state_slot() { return &g_state_ptr; }
+static __attribute__((noinline)) mc3_u32 *state_mem_slot() { return &g_state_mem; }
+
+// Every block this module takes, so that leaving Los Angeles gives all of it back
+// (release_all): the renderer holds ~11 MB, and the next city - the front
+// end's San Diego included - needs that heap.
+enum { MAX_TRACKED = 2560, RETRY_FRAMES = 120,
+       RACE_CONFIG_CURRENT = 0x00619B10, GAME_STATE = 0x006199F0,
+       RACE_CONFIG_NEXT = 0x00619B14,
+       FRONTEND_CALL = 0x001A5660,        // jal EnterStateMC3Frontend in ChangeState
+       ENTER_FRONTEND = 0x001A5B08,
+       FIRST_CITY_WITHOUT_MENU_CAMERA = 4, FRONTEND_CITY = 0 };
+struct Tracked { mc3_u32 n, ptr[MAX_TRACKED], dropped, retry, active; };
+static Tracked g_tracked;
+static __attribute__((noinline)) Tracked *trk() { return &g_tracked; }
+static void *r_alloc(mc3_u32 bytes) {
+    Tracked *t = trk();
+    if (t->n >= MAX_TRACKED) { ++t->dropped; return 0; }   // refuse rather than leak
+    void *p = mc3_alloc(bytes);
+    if (p) t->ptr[t->n++] = (mc3_u32)p;
+    return p;
+}
+static void r_free(void *p) {
+    if (!p) return;
+    Tracked *t = trk();
+    for (mc3_u32 i = 0; i < t->n; ++i)
+        if (t->ptr[i] == (mc3_u32)p) { t->ptr[i] = t->ptr[--t->n]; break; }
+    mc3_free(p);
+}
 
 static void put(char c) { *(volatile unsigned char *)0x1000F180 = (unsigned char)c; }
 static void hex8(mc3_u32 v) {
@@ -221,11 +314,36 @@ static mc3_u32 fbits(float f) {
     union { mc3_u32 u; float f; } v; v.f = f; return v.u;
 }
 static int ptr(mc3_u32 p) { return p >= 0x00100000u && p < 0x02000000u; }
+static mc3_u32 active_city() {
+    const mc3_u32 cfg = *(volatile mc3_u32 *)RACE_CONFIG_CURRENT;
+    return ptr(cfg) ? *(volatile mc3_u32 *)cfg : 0xFFFFFFFFu;
+}
+static __attribute__((noinline)) const char *empty_suffix() {
+    static const char s[] = "";
+    return s;
+}
 // The game's allocator does not return NULL when it runs out: it prints
 // "Heap (null) overrun" and stops the machine. Ask before every large block,
 // and keep a margin for whatever the game allocates after us.
+// The largest free block, not the cursor-top gap alone: entering a city from
+// the front end leaves a big freed block below a high cursor.
 static int heap_room(mc3_u32 bytes) {
-    return mc3_heap_free(mc3_heap_active()) >= bytes + HEAP_MARGIN;
+    return mc3_heap_largest(mc3_heap_active()) >= bytes + HEAP_MARGIN;
+}
+
+static State *state_acquire() {
+    State **slot = state_slot();
+    if (*slot) return *slot;
+    const mc3_u32 bytes = (mc3_u32)sizeof(State) + 32u;
+    if (!heap_room(bytes)) return 0;
+    void *mem = mc3_alloc(bytes);
+    if (!mem) return 0;
+    const mc3_u32 base = ((mc3_u32)mem + 15u) & ~15u;
+    volatile mc3_u32 *w = (volatile mc3_u32 *)base;
+    for (mc3_u32 i = 0; i < sizeof(State) / 4u; ++i) w[i] = 0u;
+    *state_mem_slot() = (mc3_u32)mem;
+    *slot = (State *)base;
+    return *slot;
 }
 
 static int world_mode() {
@@ -251,6 +369,11 @@ static float draw_radius() {
     mc3_u32 n = 0; int any = 0;
     while (v && *v >= '0' && *v <= '9') { n = n * 10u + (mc3_u32)(*v++ - '0'); any = 1; }
     return any && n >= 50u && n <= 20000u ? (float)n : 800.0f;
+}
+// [boot] mc2z = 0: draw the city without writing depth, as before 2026-09-29 (A/B).
+static int zwrite_enabled() {
+    const char *value = mc3_bootarg(MC3_ID('m','c','2','z'));
+    return !value || value[0] != '0';
 }
 // [boot] mc2q = 0: no MC2 props (diagnostic).
 static int props_enabled() {
@@ -381,7 +504,7 @@ static int build_bootstrap() {
     const mc3_u32 words = emit_bootstrap(0, &data_at);   // 2 words of tag VIF first
     const mc3_u32 body = (words + 2u) * 4u;
     if (body & 15u) { s->bootstrap_error = 2u; return 0; }
-    mc3_u8 *mem = heap_room(body + 32u) ? (mc3_u8 *)mc3_alloc(body + 32u) : 0;
+    mc3_u8 *mem = heap_room(body + 32u) ? (mc3_u8 *)r_alloc(body + 32u) : 0;
     if (!mem) { s->bootstrap_error = 3u; return 0; }
     const mc3_u32 base = ((mc3_u32)mem + 15u) & ~15u;
     mc3_u32 *w = (mc3_u32 *)base;
@@ -403,7 +526,7 @@ static int build_bootstrap() {
 static int alloc_frame_mem() {
     State *s = st();
     const mc3_u32 bytes = 2u * ARENA_BYTES + 16u;
-    mc3_u8 *mem = heap_room(bytes) ? (mc3_u8 *)mc3_alloc(bytes) : 0;
+    mc3_u8 *mem = heap_room(bytes) ? (mc3_u8 *)r_alloc(bytes) : 0;
     if (!mem) { s->texture_error = 5u; return 0; }
     const mc3_u32 frame = ((mc3_u32)mem + 15u) & ~15u;
     s->frame_mem = (mc3_u32)mem;
@@ -540,16 +663,17 @@ static int plan_rsc_textures();
 static void close_rsc_stream(State *s) {
     if (s->rsc_stream)
         MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->rsc_stream);
-    mc3_free((void *)s->rsc_table_mem);
-    mc3_free((void *)s->rsc_scratch_mem);
+    r_free((void *)s->rsc_table_mem);
+    r_free((void *)s->rsc_scratch_mem);
     s->rsc_stream = 0;
     s->rsc_table_mem = s->rsc_table = 0;
     s->rsc_scratch_mem = s->rsc_scratch = 0;
 }
 
 static int open_rsc_stream() {
-    static const char path[] = "host0:/mc2/losangeles/losangeles.rsc";
     State *s = st();
+    const char *const path = mc2_city_rsc(active_city());
+    if (!path) { s->rsc_error = 1; s->rsc_state = 3; return 0; }
     const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)
         (path, STREAM_RAW);
     if (!h) { s->rsc_error = 1; s->rsc_state = 3; return 0; }
@@ -571,13 +695,13 @@ static int open_rsc_stream() {
         s->rsc_state = 3;
         return 0;
     }
-    mc3_u8 *table_mem = (mc3_u8 *)mc3_alloc(table_bytes + 16u);
-    mc3_u8 *scratch_mem = (mc3_u8 *)mc3_alloc(2048u + 16u);
+    mc3_u8 *table_mem = (mc3_u8 *)r_alloc(table_bytes + 16u);
+    mc3_u8 *scratch_mem = (mc3_u8 *)r_alloc(2048u + 16u);
     if (!table_mem || !scratch_mem) {
         s->rsc_error = 4;
         MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
-        mc3_free(table_mem);
-        mc3_free(scratch_mem);
+        r_free(table_mem);
+        r_free(scratch_mem);
         s->rsc_state = 3;
         return 0;
     }
@@ -586,8 +710,8 @@ static int open_rsc_stream() {
     if (!read_exact(h, (void *)table, table_bytes)) {
         s->rsc_error = 5;
         MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
-        mc3_free(table_mem);
-        mc3_free(scratch_mem);
+        r_free(table_mem);
+        r_free(scratch_mem);
         s->rsc_state = 3;
         return 0;
     }
@@ -632,7 +756,7 @@ static int build_packet(Piece *piece, const Target *target) {
         if (r < 0) { fail(piece, 7); goto done; }
         if (r == 0) return 2;
     }
-    packet_mem = (mc3_u8 *)mc3_alloc(PACKET_MAX + 16u);
+    packet_mem = (mc3_u8 *)r_alloc(PACKET_MAX + 16u);
     if (!packet_mem) { fail(piece, 8); goto done; }
     {
         const mc3_u32 base = ((mc3_u32)packet_mem + 15u) & ~15u;
@@ -677,7 +801,7 @@ static int build_packet(Piece *piece, const Target *target) {
         const mc3_u32 matrix_bytes = target->flags == 0u ? MATRIX_BYTES : 0u;
         // Many-city mode depends on compaction: never retain a 64 KiB buffer
         // per model if the game's allocator cannot provide the compact copy.
-        mc3_u8 *compact_mem = (mc3_u8 *)mc3_alloc(size + nseg * 12u + matrix_bytes + 32u);
+        mc3_u8 *compact_mem = (mc3_u8 *)r_alloc(size + nseg * 12u + matrix_bytes + 32u);
         if (!compact_mem) { fail(piece, 17); goto done; }
         const mc3_u32 compact = ((mc3_u32)compact_mem + 15u) & ~15u;
         for (mc3_u32 j = 0; j < size / 4u; ++j)
@@ -699,7 +823,7 @@ static int build_packet(Piece *piece, const Target *target) {
             w[0] = w[5] = w[10] = w[15] = fbits(1.0f);
             piece->packet = m;
         }
-        mc3_free(packet_mem);
+        r_free(packet_mem);
         packet_mem = compact_mem;
         piece->block = compact;
         piece->block_bytes = size;
@@ -711,7 +835,7 @@ static int build_packet(Piece *piece, const Target *target) {
     }
 done:
     if (!piece->ready) {
-        mc3_free(packet_mem);
+        r_free(packet_mem);
         s->rsc_error = piece->error;
         s->rsc_state = 3;
         close_rsc_stream(s);
@@ -810,6 +934,31 @@ static void queue_upload(mc3_u32 p, mc3_u32 data, mc3_u32 qwc, mc3_u32 dbp,
     queue_ref(data, qwc, 0u, VIF_DIRECT | qwc);
 }
 
+// ZBUF for the city. The GS state this renderer sets (bootstrap: TEX1, CLAMP,
+// TEST, ALPHA) never included ZBUF, so the city drew with whatever Z write
+// mask MC3 had left - and at SetCamera time that is OFF: the MC2 city wrote
+// no depth. Cars behind a building were still hidden (drawn before it, then
+// painted over) but everything MC3 draws after the city with a depth test and
+// no Z write - light reflections on the road (mcGlow::drawLightReflections via
+// sub_251AF8, drawn by mcCullableMgr::Render with ZTST GEQUAL), glows - showed
+// through the walls. The value is MC3's own: gfxState::SetZWriteEnable writes
+// register 0x4E + context (byte 0x715C9D) = *(u64 *)0x6F4888 | ZMSK << 32; the
+// write flag it believes in is the byte at 0x70E5A8, restored after the city.
+enum { GS_ZBUF_BASE = 0x006F4888, GS_ZWRITE_FLAG = 0x0070E5A8, GS_CONTEXT = 0x00715C9D };
+static void queue_zbuf(mc3_u32 arena, int write) {
+    State *s = st();
+    if (!arena_can_take(48u)) return;
+    const mc3_u32 p = arena + s->arena_used;
+    mc3_u32 *w = (mc3_u32 *)(p | UNCACHED);
+    w[0] = 0u; w[1] = 0u; w[2] = VIF_FLUSH; w[3] = VIF_DIRECT | 2u;
+    w[4] = 0x8001u; w[5] = 0x10000000u; w[6] = 0xEu; w[7] = 0u;     // A+D x1, EOP
+    w[8] = word(GS_ZBUF_BASE);
+    w[9] = word(GS_ZBUF_BASE + 4u) | (write ? 0u : 1u);           // ZMSK
+    w[10] = 0x4Eu + *(volatile mc3_u8 *)GS_CONTEXT; w[11] = 0u;
+    queue_ref(p, 3u, 0u, 0u);
+    s->arena_used += 48u;
+}
+
 static mc3_u32 use_image(mc3_u32 image, mc3_u32 arena) {
     State *s = st();
     if (image_resident(image)) return s->image_switch[image];
@@ -869,11 +1018,20 @@ static mc3_u32 texture_slot(mc3_u32 handle);
 // batch; each switch carries a FLUSH that makes the VIF wait for the VU, so
 // sending a switch that is already in effect costs a pipeline stall for
 // nothing (measured: ~2000 of them per frame, 30 -> 17 FPS).
+static volatile mc3_u32 *ad_begin(mc3_u32 arena, mc3_u32 n);
+static void ad_put(volatile mc3_u32 *w, mc3_u32 k, mc3_u32 lo, mc3_u32 hi, mc3_u32 reg);
 static void bind_switch(mc3_u32 sw) {
     State *s = st();
     if (sw == s->bound_switch) return;
     s->bound_switch = sw;
     queue_ref(sw, 7u, 0u, 0u);
+    if (s->force_tcc) {
+        // the same TEX0 with TCC=1 (and no CLUT reload): the texture's own
+        // alpha - the wetness of MC2's ground textures - reaches the frame
+        const volatile mc3_u32 *w = (const volatile mc3_u32 *)(sw | UNCACHED);
+        volatile mc3_u32 *a = ad_begin(s->arena[s->queued & 1u], 1u);
+        if (a) ad_put(a, 0, w[8], (w[9] | 4u) & ~(7u << 29), 0x06u);
+    }
 }
 
 // Queue a piece's PMD0 as MC2 would run it: each segment, then the texture
@@ -906,8 +1064,7 @@ static int queue_piece(const Piece *piece, mc3_u32 arena) {
 // MC2 CPVS
 // ---------------------------------------------------------------------------
 static __attribute__((noinline)) const char *cpvs_folder() {
-    static const char s[] = "host0:/mc2/losangeles/";
-    return s;
+    return mc2_city_root(active_city());
 }
 static __attribute__((noinline)) const char *cpvs_suffix() {
     static const char s[] = "_cpvs.rsc";
@@ -1050,14 +1207,19 @@ static mc3_u32 make_slot(mc3_u32 container, mc3_u32 tex) {
     // the vertex (TCC=0). Eight more ground textures of that bank (crosswalk,
     // ghetto/freeway asphalt, two sidewalks) carry a faint alpha, at most 0x1F:
     // not opacity either - with TCC=1 the crosswalks drew almost transparent.
-    // So in the shared bank alpha counts only from 0x40 up; in the city
-    // container any non-zero alpha keeps TCC=1 (glass, cut-outs).
+    // The one texture of LA's bank with more alpha, l_roads_sidewalkghetto0
+    // (CLUT alpha up to 0x80), has alpha 0 in 99.4% of its texels - a mask,
+    // not a cut-out: with TCC=1 the ghetto sidewalks (6laneroad_g_*,
+    // 4laneroad_g_*, the ghetto blocks) vanished and the background showed
+    // (found from the player's pins, 2026-09-27). So the shared bank - ground
+    // textures only - is always TCC=0; in the city container any non-zero
+    // alpha keeps TCC=1 (glass, cut-outs).
     mc3_u32 top_alpha = 0u;
     for (mc3_u32 i = 0; i < (t->bpp == 8u ? 256u : 16u); ++i) {
         const mc3_u32 a = word(pal + 16u + i * 4u) >> 24;
         if (a > top_alpha) top_alpha = a;
     }
-    t->tcc = container == 1u ? top_alpha >= 0x40u : top_alpha != 0u;
+    t->tcc = container == 1u ? 0u : top_alpha != 0u;
     return s->slot_count++;
 }
 
@@ -1077,7 +1239,7 @@ static mc3_u32 texture_slot(mc3_u32 handle) {
 static int make_white() {
     State *s = st();
     if (s->slot_count >= MAX_IMAGES || !heap_room(256u + 1024u + 32u)) return 0;
-    mc3_u8 *mem = (mc3_u8 *)mc3_alloc(256u + 1024u + 32u);
+    mc3_u8 *mem = (mc3_u8 *)r_alloc(256u + 1024u + 32u);
     if (!mem) return 0;
     const mc3_u32 base = ((mc3_u32)mem + 15u) & ~15u;
     for (mc3_u32 i = 0; i < (256u + 1024u) / 4u; ++i) ((mc3_u32 *)base)[i] = 0u;
@@ -1097,9 +1259,9 @@ static int build_slots() {
     State *s = st();
     const mc3_u32 local_bytes = s->rsc_count * 2u + 16u;
     const mc3_u32 shared_bytes = s->shared_count * 2u + 16u;
-    mc3_u8 *a = heap_room(local_bytes + shared_bytes) ? (mc3_u8 *)mc3_alloc(local_bytes) : 0;
-    mc3_u8 *b = a ? (mc3_u8 *)mc3_alloc(shared_bytes) : 0;
-    if (!b) { mc3_free(a); return 0; }
+    mc3_u8 *a = heap_room(local_bytes + shared_bytes) ? (mc3_u8 *)r_alloc(local_bytes) : 0;
+    mc3_u8 *b = a ? (mc3_u8 *)r_alloc(shared_bytes) : 0;
+    if (!b) { r_free(a); return 0; }
     s->slot_of_local = ((mc3_u32)a + 15u) & ~15u;
     s->slot_of_shared = ((mc3_u32)b + 15u) & ~15u;
     s->slot_count = 0;
@@ -1170,9 +1332,9 @@ static int plan_rsc_textures() {
     }
     const mc3_u32 map_bytes = s->rsc_count * 4u + 16u;
     if (!heap_room(total + map_bytes + 32u)) { s->texture_error = 3u; return 0; }
-    mc3_u8 *map = (mc3_u8 *)mc3_alloc(map_bytes);
-    mc3_u8 *data = map ? (mc3_u8 *)mc3_alloc(total + 16u) : 0;
-    if (!data) { mc3_free(map); s->texture_error = 3u; return 0; }
+    mc3_u8 *map = (mc3_u8 *)r_alloc(map_bytes);
+    mc3_u8 *data = map ? (mc3_u8 *)r_alloc(total + 16u) : 0;
+    if (!data) { r_free(map); s->texture_error = 3u; return 0; }
     s->tex_dest = ((mc3_u32)map + 15u) & ~15u;
     mc3_u32 *dest = (mc3_u32 *)s->tex_dest;
     mc3_u32 at = ((mc3_u32)data + 15u) & ~15u;
@@ -1209,7 +1371,7 @@ static void step_shared_textures() {
         if (!h) { s->texture_error = 6u; s->shared_state = 3u; return; }
         const int size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
         mc3_u8 *mem = size > 16 && size <= 0x200000 && heap_room((mc3_u32)size + 16u)
-            ? (mc3_u8 *)mc3_alloc((mc3_u32)size + 16u) : 0;
+            ? (mc3_u8 *)r_alloc((mc3_u32)size + 16u) : 0;
         if (!mem) {
             s->texture_error = 7u;
             MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
@@ -1262,16 +1424,13 @@ static void step_shared_textures() {
 // ---------------------------------------------------------------------------
 
 static __attribute__((noinline)) const char *city_folder() {
-    static const char s[] = "host0:/mc2/losangeles/city/";
-    return s;
+    return mc2_city_dir(active_city());
 }
 static __attribute__((noinline)) const char *rnt_name() {
-    static const char s[] = "host0:/mc2/losangeles/losangeles.rnt";
-    return s;
+    return mc2_city_rnt(active_city());
 }
 static __attribute__((noinline)) const char *lvl_name() {
-    static const char s[] = "losangeles.lvl";
-    return s;
+    return mc2_city_lvl(active_city());
 }
 static __attribute__((noinline)) const char *hood_suffix() {
     static const char s[] = ".hood";
@@ -1284,6 +1443,16 @@ static __attribute__((noinline)) const char *cpvs_rnt_suffix() {
 
 static mc3_u32 lower(mc3_u32 c) { return c >= 'A' && c <= 'Z' ? c + 32u : c; }
 // FNV-1a over the lowercased name, `n` characters or up to NUL/space.
+// MC2's fake reflections: `l_inst_*cardblk*` / `*card*` models are vertical
+// glow cards (fx_reflection_01) standing BELOW the ground under shop windows -
+// the windows mirrored. 68 models / 530 instances in LA.
+static int name_has_card(const char *p) {
+    for (mc3_u32 i = 0; i < 120u && p[i]; ++i) {
+        const char a = p[i] | 0x20, b = p[i + 1] | 0x20, c = p[i + 2] | 0x20, d = p[i + 3] | 0x20;
+        if (a == 'c' && b == 'a' && c == 'r' && d == 'd') return 1;
+    }
+    return 0;
+}
 static mc3_u32 name_hash(const char *p, mc3_u32 n) {
     mc3_u32 h = 2166136261u;
     for (mc3_u32 i = 0; i < n && p[i] && p[i] != ' ' && p[i] != '\t' &&
@@ -1322,12 +1491,12 @@ static mc3_u32 read_whole(const char *path, mc3_u32 max, mc3_u32 *bytes, mc3_u32
     if (!h) return 0u;
     const int size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
     mc3_u8 *m = size > 0 && (mc3_u32)size <= max && heap_room((mc3_u32)size + 32u)
-        ? (mc3_u8 *)mc3_alloc((mc3_u32)size + 32u) : 0;
+        ? (mc3_u8 *)r_alloc((mc3_u32)size + 32u) : 0;
     mc3_u32 base = 0u;
     if (m) {
         base = ((mc3_u32)m + 15u) & ~15u;
         if (read_exact(h, (void *)base, (mc3_u32)size)) ((mc3_u8 *)base)[size] = 0;
-        else { mc3_free(m); m = 0; base = 0u; }
+        else { r_free(m); m = 0; base = 0u; }
     }
     MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
     *bytes = m ? (mc3_u32)size : 0u;
@@ -1366,6 +1535,8 @@ static int build_catalog() {
         }
         if (!name) { s->manifest_error = 5u; return 0; }
         s->model_name[m] = name;
+        if (name_has_card((const char *)name)) s->card_model[m >> 5] |= 1u << (m & 31u);
+        else s->card_model[m >> 5] &= ~(1u << (m & 31u));
         mc3_u32 at = name_hash((const char *)name, 256u) & (MODEL_HASH - 1u);
         while (s->model_hash[at] != 0xFFFFu) at = (at + 1u) & (MODEL_HASH - 1u);
         s->model_hash[at] = (mc3_u16)m;
@@ -1585,9 +1756,9 @@ static void step_hoods() {
     Hood *hd = &s->hood;
     if (s->hood_state == 0u) {
         const mc3_u32 need = MAX_INSTANCES * (20u + 64u) + 64u;
-        mc3_u8 *a = heap_room(need) ? (mc3_u8 *)mc3_alloc(MAX_INSTANCES * 20u + 16u) : 0;
-        mc3_u8 *b = a ? (mc3_u8 *)mc3_alloc(MAX_INSTANCES * 64u + 16u) : 0;
-        mc3_u8 *c = b ? (mc3_u8 *)mc3_alloc(HOOD_CHUNK + 512u) : 0;
+        mc3_u8 *a = heap_room(need) ? (mc3_u8 *)r_alloc(MAX_INSTANCES * 20u + 16u) : 0;
+        mc3_u8 *b = a ? (mc3_u8 *)r_alloc(MAX_INSTANCES * 64u + 16u) : 0;
+        mc3_u8 *c = b ? (mc3_u8 *)r_alloc(HOOD_CHUNK + 512u) : 0;
         if (!c) { s->instances_error = 3u; s->hood_state = 9u; return; }
         s->instances_bank_mem = (mc3_u32)a;
         s->instances_bank = ((mc3_u32)a + 15u) & ~15u;
@@ -1596,8 +1767,7 @@ static void step_hoods() {
         hd->buf_mem = (mc3_u32)c;
         hd->buf = (mc3_u8 *)(((mc3_u32)c + 15u) & ~15u);
         s->instance_count = 0; s->hood_count = 0; s->hood_bad = 0;
-        const char *empty = lvl_name() + 14;           // ""
-        if (!hood_open(lvl_name(), empty)) { s->instances_error = 1u; s->hood_state = 9u; return; }
+        if (!hood_open(lvl_name(), empty_suffix())) { s->instances_error = 1u; s->hood_state = 9u; return; }
         s->hood_state = 1u;
     }
     if (s->hood_state == 1u) {                          // the .lvl
@@ -1625,7 +1795,7 @@ static void step_hoods() {
         return;                                          // one file per frame at most
     }
     if (s->hood_state == 3u) {
-        mc3_free((void *)hd->buf_mem);
+        r_free((void *)hd->buf_mem);
         hd->buf_mem = 0;
         for (mc3_u32 i = 0; i < s->target_count; ++i)
             s->targets[i].flags = s->models[s->targets[i].model_id].flags;
@@ -1656,6 +1826,24 @@ static mc3_u32 find_instance(mc3_u32 model, mc3_u32 ext) {
 
 // <tod>_cpvs.rnt: which LOD 0 `_main` PCP0 draws each placement, and the list
 // of component PCP0s (their records are found later, from their refs).
+// `_0_refl` chains too: despite the name they are not a second pass over the
+// same geometry - they colour the OTHER near pieces of a model, the road deck
+// and sidewalks (LA: 309 pieces, Paris: 343, never referenced by a `_main`).
+// Without them that ground was drawn with the flat colour, a visible seam
+// against the lit piece beside it. Read after every `_main` (second pass).
+static int refl_tables() {
+    State *s = st();
+    if (s->inst_refl) return 1;
+    const mc3_u32 bytes = MAX_INSTANCES * 2u + (MAX_PIECES + MAX_INSTANCES) * 2u +
+                          MAX_CPVS_ENTRIES / 8u + 32u;
+    mc3_u8 *mem = heap_room(bytes) ? (mc3_u8 *)r_alloc(bytes) : 0;
+    if (!mem) return 0;
+    const mc3_u32 base = ((mc3_u32)mem + 15u) & ~15u;
+    s->refl_chain = (mc3_u32 *)base;
+    s->inst_refl = (mc3_u16 *)(base + MAX_CPVS_ENTRIES / 8u);
+    s->later = s->inst_refl + MAX_INSTANCES;
+    return 1;
+}
 static int build_cpvs_names() {
     State *s = st();
     char path[96];
@@ -1669,15 +1857,17 @@ static int build_cpvs_names() {
     mc3_u32 bytes, mem;
     const mc3_u32 rnt = read_whole(path, 0x200000u, &bytes, &mem);
     if (!rnt || word(rnt) != RNT0 || 0x18u + word(rnt + 4u) * 12u > bytes) {
-        mc3_free((void *)mem);
+        r_free((void *)mem);
         s->map_error = 1u; return 0;
     }
-    for (mc3_u32 i = 0; i < MAX_CPVS_ENTRIES / 32u; ++i) s->cpvs_need[i] = 0u;
-    for (mc3_u32 i = 0; i < MAX_INSTANCES; ++i) s->instance_word[i] = 0u;
+    const int refl_ok = refl_tables();       // without them: no `_0_refl` chains at all
+    for (mc3_u32 i = 0; i < MAX_CPVS_ENTRIES / 32u; ++i) { s->cpvs_need[i] = 0u; if (refl_ok) s->refl_chain[i] = 0u; }
+    for (mc3_u32 i = 0; i < MAX_INSTANCES; ++i) { s->instance_word[i] = 0u; if (refl_ok) s->inst_refl[i] = 0u; }
     for (mc3_u32 i = 0; i < MAX_PIECES; ++i) s->target_word[i] = 0u;
     s->comp_pcp_count = 0;
-    mc3_u32 inst_hits = 0;
+    mc3_u32 inst_hits = 0, refl_hits = 0;
     const mc3_u32 nrec = word(rnt + 4u);
+    for (mc3_u32 pass = 0; pass < (refl_ok ? 2u : 1u); ++pass)
     for (mc3_u32 r = 0; r < nrec; ++r) {
         const mc3_u32 rec = rnt + 0x18u + r * 12u;
         if (word(rec + 4u) != PCP0 || word(rec) >= bytes) continue;
@@ -1686,20 +1876,24 @@ static int build_cpvs_names() {
         const char *nm = (const char *)(rnt + word(rec));
         mc3_u32 len = 0;
         while (nm[len]) ++len;
-        // "..._0_main"
-        if (len < 8u || nm[len - 7u] != '_' || nm[len - 6u] != '0' || nm[len - 5u] != '_' ||
-            lower((mc3_u8)nm[len - 4u]) != 'm' || lower((mc3_u8)nm[len - 3u]) != 'a' ||
-            lower((mc3_u8)nm[len - 2u]) != 'i' || lower((mc3_u8)nm[len - 1u]) != 'n')
+        // "..._0_main" (pass 0) or "..._0_refl" (pass 1)
+        if (len < 8u || nm[len - 7u] != '_' || nm[len - 6u] != '0' || nm[len - 5u] != '_')
             continue;
+        const mc3_u8 c0 = lower((mc3_u8)nm[len - 4u]), c1 = lower((mc3_u8)nm[len - 3u]),
+                     c2 = lower((mc3_u8)nm[len - 2u]), c3 = lower((mc3_u8)nm[len - 1u]);
+        const int is_main = c0 == 'm' && c1 == 'a' && c2 == 'i' && c3 == 'n';
+        const int is_refl = c0 == 'r' && c1 == 'e' && c2 == 'f' && c3 == 'l';
+        if (pass == 0u ? !is_main : !is_refl) continue;
         const mc3_u32 core = len - 7u;              // name without "_0_main"
+        const mc3_u8 inst_prefix = (mc3_u8)mc2_city_instance_prefix(active_city());
         mc3_u32 inst_at = 0xFFFFFFFFu;
         for (mc3_u32 i = 0; i + 8u <= core; ++i)
-            if (nm[i] == '_' && lower((mc3_u8)nm[i + 1u]) == 'l' && nm[i + 2u] == '_' &&
+            if (nm[i] == '_' && lower((mc3_u8)nm[i + 1u]) == inst_prefix && nm[i + 2u] == '_' &&
                 lower((mc3_u8)nm[i + 3u]) == 'i' && lower((mc3_u8)nm[i + 4u]) == 'n' &&
                 lower((mc3_u8)nm[i + 5u]) == 's' && lower((mc3_u8)nm[i + 6u]) == 't' &&
                 nm[i + 7u] == '_') { inst_at = i + 1u; break; }
         if (inst_at != 0xFFFFFFFFu) {
-            // l_inst_<type><extension>: the extension is the trailing digits
+            // <city>_inst_<type><extension>: extension is the trailing digits.
             mc3_u32 d = core;
             while (d > inst_at && nm[d - 1u] >= '0' && nm[d - 1u] <= '9') --d;
             if (d == core || d == inst_at) continue;
@@ -1709,23 +1903,86 @@ static int build_cpvs_names() {
             if (model == NO_IMAGE) continue;
             const mc3_u32 inst = find_instance(model, ext);
             if (inst == NO_IMAGE) continue;
-            s->instance_word[inst] = index + 1u;
+            if (pass == 0u) { s->instance_word[inst] = index + 1u; ++inst_hits; }
+            else { s->inst_refl[inst] = (mc3_u16)(index + 1u); ++refl_hits; }
             s->cpvs_need[index >> 5] |= 1u << (index & 31u);
-            ++inst_hits;
+            if (pass == 1u) s->refl_chain[index >> 5] |= 1u << (index & 31u);
         } else if (s->comp_pcp_count < MAX_COMP_PCP) {
             s->comp_pcp[s->comp_pcp_count++] = (mc3_u16)index;
             s->cpvs_need[index >> 5] |= 1u << (index & 31u);
+            if (pass == 1u) { ++refl_hits; s->refl_chain[index >> 5] |= 1u << (index & 31u); }
         }
     }
-    mc3_free((void *)mem);
+    r_free((void *)mem);
     s->names_ready = 1u;
-    mark('R','C','P','N', s->comp_pcp_count, inst_hits);
+    mark('R','C','P','N', s->comp_pcp_count, (refl_hits << 16) | (inst_hits & 0xFFFFu));
     return 1;
 }
 
 // After the cpvs file is in: a component PCP0 is drawn by the lowest record
 // it takes geometry from; every record it covers skips its own PMD0.
 static int resolve_ref_target(mc3_u32 addr, mc3_u32 qwc);
+// An instance's `_0_main` PCP0 does not always draw its whole model: in 100
+// of LA's instanced types it takes only the first near PMD0, and the others -
+// the ground of the model: freeway and road deck (8lanefwy_*, 4laneroad_*),
+// warehouse yards, office parking - have no PCP0 at all; MC2 draws them
+// straight from the PMD0. Drawing the PCP0 alone made that ground vanish
+// (the background showed through) as soon as the CPVS was in. Bits 16..19 of
+// instance_word = the model's pieces neither its `_main` nor its `_refl` PCP0
+// covers, drawn flat after them; bits 20..23 = the pieces the `_refl` chain
+// covers (drawn flat if that chain cannot be queued). An absent or unloaded
+// chain is dropped here (low 16 bits / inst_refl cleared).
+// Marker RCOI <instances with a PCP0> <pieces left out << 16 | with a _refl>.
+static __attribute__((noinline)) mc3_u32 pcp_pieces(mc3_u32 index1, const ModelDraw *model) {
+    const State *s = st();
+    const mc3_u32 index = index1 - 1u;
+    if (!index1 || index >= s->cpvs_count) return 0x80000000u;
+    const mc3_u32 v = ((const mc3_u32 *)s->cpvs_table)[index];
+    if (!(v & 0x80000000u)) return 0x80000000u;
+    mc3_u32 used = 0;                            // bit j: model piece j referenced
+    const mc3_u32 off = (v & 0x3FFFFu) << 4;
+    const mc3_u32 end = off + (((v >> 18) & 0x1FFFu) << 4);
+    for (mc3_u32 p = off; p + 16u <= end;) {
+        const mc3_u32 at = s->cpvs + p;
+        const mc3_u32 lo = word(at), id = (lo >> 28) & 7u, qwc = lo & 0xFFFFu;
+        if (id == 3u) {
+            const int t = resolve_ref_target(word(at + 4u), qwc);
+            for (mc3_u32 j = 0; t >= 0 && j < model->count && j < 4u; ++j)
+                if (model->pieces[j] == (mc3_u32)t) used |= 1u << j;
+            p += 16u;
+            continue;
+        }
+        p += 16u + qwc * 16u;
+        if (id == 6u || id == 7u) break;
+    }
+    return used;
+}
+static void cover_instances() {
+    State *s = st();
+    mc3_u32 with_pcp = 0, partial = 0, with_refl = 0;
+    for (mc3_u32 i = 0; i < s->instance_count; ++i) {
+        const mc3_u32 w = s->instance_word[i];
+        const mc3_u32 refl1 = s->inst_refl ? s->inst_refl[i] : 0u;
+        if (!(w & 0xFFFFu) && !refl1) continue;
+        const ModelDraw *model = &s->models[instance_record(s, i)[0]];
+        mc3_u32 main_used = pcp_pieces(w & 0xFFFFu, model);
+        mc3_u32 refl_used = pcp_pieces(refl1, model);
+        mc3_u32 main_index = w & 0xFFFFu;
+        if (main_used & 0x80000000u) { main_used = 0; main_index = 0; }
+        if (refl_used & 0x80000000u) { refl_used = 0; if (refl1) s->inst_refl[i] = 0; }
+        refl_used &= ~main_used;                 // never twice
+        const int has_refl = s->inst_refl && s->inst_refl[i];
+        if (!main_index && !has_refl) { s->instance_word[i] = 0u; continue; }
+        mc3_u32 left = 0;
+        for (mc3_u32 j = 0; j < model->count && j < 4u; ++j)
+            if (!((main_used | refl_used) & (1u << j))) left |= 1u << (16u + j);
+        s->instance_word[i] = main_index | left | (refl_used << 20);
+        ++with_pcp;
+        if (left) ++partial;
+        if (has_refl) ++with_refl;
+    }
+    mark('R','C','O','I', with_pcp, (partial << 16) | (with_refl & 0xFFFFu));
+}
 static void cover_components() {
     State *s = st();
     mc3_u32 done = 0;
@@ -1760,6 +2017,7 @@ static void cover_components() {
     }
     s->map_ready = 1u;
     mark('R','C','O','V', done, s->comp_pcp_count);
+    cover_instances();
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,13 +2049,15 @@ static __attribute__((noinline)) const char *rnt_suffix() {
     return s;
 }
 static __attribute__((noinline)) const char *prop_file() {
-    static const char s[] = "losangeles.prop";
-    return s;
+    return mc2_city_prop(active_city());
 }
 static __attribute__((noinline)) const char *kw_prop() { static const char s[] = "prop "; return s; }
 static __attribute__((noinline)) const char *kw_template() { static const char s[] = "prop_template"; return s; }
 static __attribute__((noinline)) const char *kw_matrix() { static const char s[] = "matrix"; return s; }
 static __attribute__((noinline)) const char *kw_far() { static const char s[] = "Far:"; return s; }
+static __attribute__((noinline)) const char *kw_fixed() { static const char s[] = "FixedObject:"; return s; }
+static __attribute__((noinline)) const char *kw_gfx() { static const char s[] = "GfxOnly:"; return s; }
+static __attribute__((noinline)) const char *kw_drivable() { static const char s[] = "Drivable:"; return s; }
 
 // An ambients entry, read with Seek the first time it is asked for.
 static mc3_u32 amb_entry(mc3_u32 index, mc3_u32 fourcc) {
@@ -1809,11 +2069,11 @@ static mc3_u32 amb_entry(mc3_u32 index, mc3_u32 fourcc) {
     const mc3_u32 end = index + 1u < s->amb_count ? word(s->amb_table + (index + 1u) * 8u)
                                                   : s->amb_bytes;
     if (end <= off || end - off > 0x40000u || !heap_room(end - off + 32u)) return 0u;
-    mc3_u8 *mem = (mc3_u8 *)mc3_alloc(end - off + 32u);
+    mc3_u8 *mem = (mc3_u8 *)r_alloc(end - off + 32u);
     if (!mem) return 0u;
     const mc3_u32 at = ((mc3_u32)mem + 15u) & ~15u;
     if (stream_seek(s->amb_stream, off) < 0 || !read_exact(s->amb_stream, (void *)at, end - off)) {
-        mc3_free(mem);
+        r_free(mem);
         return 0u;
     }
     s->amb_loaded += end - off;
@@ -1857,6 +2117,47 @@ static mc3_u32 load_mod(mc3_u32 handle, mc3_u32 *addr, mc3_u16 *qwc, mc3_u16 *sl
 }
 
 // The template's PRP0 (by name in the ambients .rnt) and its MOD0s.
+
+// MC2's physics tuning of a prop: host0:/mc2/tune/phys/<name>.phys (copied by
+// the installer from assets/tune/phys). Only `mass:` is used - everything in
+// LA's set is type BREAK; 1000 kg and up (parked car, containers) stays put.
+static __attribute__((noinline)) const char *phys_dir() { static const char s[] = "host0:/mc2/tune/phys/"; return s; }
+static __attribute__((noinline)) const char *phys_ext() { static const char s[] = ".phys"; return s; }
+static __attribute__((noinline)) const char *kw_mass() { static const char s[] = "mass:"; return s; }
+static mc3_u32 read_whole(const char *path, mc3_u32 max, mc3_u32 *bytes, mc3_u32 *mem);
+static void load_prop_mass(PropType *t) {
+    char path[96];
+    mc3_u32 n = 0;
+    for (const char *d = phys_dir(); *d && n < 60u; ++d) path[n++] = *d;
+    for (mc3_u32 i = 0; t->name[i] && n < 88u; ++i) path[n++] = t->name[i];
+    for (const char *e = phys_ext(); *e && n < 95u; ++e) path[n++] = *e;
+    path[n] = 0;
+    t->mass = ffrom(0x42480000u);                       // 50 kg
+    mc3_u32 bytes = 0, mem = 0;
+    const mc3_u32 base = read_whole(path, 4096u, &bytes, &mem);
+    t->has_phys = base != 0u;
+    if (base) {
+        const char *q = (const char *)base;
+        for (mc3_u32 i = 0; i + 5u < bytes; ++i)
+            if (starts(q + i, kw_mass())) {
+                const char *v = q + i + 5;
+                t->mass = parse_float(&v);
+                break;
+            }
+        r_free((void *)mem);
+    }
+    t->fixed = t->mass >= ffrom(0x447A0000u);          // 1000 kg
+}
+static __attribute__((noinline)) const char *kw_palm() { static const char s[] = "palm"; return s; }
+static __attribute__((noinline)) const char *kw_tree() { static const char s[] = "tree"; return s; }
+static int name_has(const char *name, const char *w) {
+    for (mc3_u32 i = 0; i < 48u && name[i]; ++i) {
+        mc3_u32 k = 0;
+        while (w[k] && i + k < 48u && lower((mc3_u8)name[i + k]) == (mc3_u32)w[k]) ++k;
+        if (!w[k]) return 1;
+    }
+    return 0;
+}
 static void load_prop_type(PropType *t) {
     State *s = st();
     t->ok = 0;
@@ -1879,6 +2180,8 @@ static void load_prop_type(PropType *t) {
     t->cy = fword((const mc3_u32 *)(p + 12u));
     t->cz = fword((const mc3_u32 *)(p + 16u));
     t->radius = fword((const mc3_u32 *)(p + 20u));
+    load_prop_mass(t);
+    t->trunk = name_has(t->name, kw_palm()) || name_has(t->name, kw_tree());
     t->ok = 1;
     ++s->prop_types_ok;
 }
@@ -1909,6 +2212,7 @@ static void prop_line(const char *p) {
             }
             t->name[n] = 0;
             t->far = 0;
+            t->fixed_object = t->gfx_only = t->drivable = 0;
             load_prop_type(t);
             return;
         }
@@ -1931,6 +2235,12 @@ static void prop_line(const char *p) {
         ((mc3_u32 *)rec)[4] = type;
         hd->rows = 0;
         return;
+    }
+    if (s->prop_type_count && !hd->in_inst) {
+        PropType *last = &s->prop_types[s->prop_type_count - 1u];
+        if (starts(p, kw_fixed())) { last->fixed_object = p[12] == ' ' ? p[13] == '1' : p[12] == '1'; return; }
+        if (starts(p, kw_gfx())) { last->gfx_only = p[8] == ' ' ? p[9] == '1' : p[8] == '1'; return; }
+        if (starts(p, kw_drivable())) { last->drivable = p[9] == ' ' ? p[10] == '1' : p[9] == '1'; return; }
     }
     if (starts(p, kw_far()) && s->prop_type_count && !hd->in_inst) {
         const char *q = p + 4;
@@ -1968,10 +2278,10 @@ static void step_props() {
         const mc3_u32 count = read_exact(h, head, 8u) && le32(head) == RSC0 ? le32(head + 4u) : 0u;
         const mc3_u32 need = count * 8u + count * 4u + count * 2u + MAX_PROPS * 84u + 256u;
         mc3_u8 *tab = count && count <= MAX_AMB_ENTRIES && heap_room(need)
-            ? (mc3_u8 *)mc3_alloc(count * 14u + 64u) : 0;
-        mc3_u8 *recs = tab ? (mc3_u8 *)mc3_alloc(MAX_PROPS * 20u + 16u) : 0;
-        mc3_u8 *mats = recs ? (mc3_u8 *)mc3_alloc(MAX_PROPS * 64u + 16u) : 0;
-        mc3_u8 *buf = mats ? (mc3_u8 *)mc3_alloc(HOOD_CHUNK + 512u) : 0;
+            ? (mc3_u8 *)r_alloc(count * 14u + 64u) : 0;
+        mc3_u8 *recs = tab ? (mc3_u8 *)r_alloc(MAX_PROPS * 20u + 16u) : 0;
+        mc3_u8 *mats = recs ? (mc3_u8 *)r_alloc(MAX_PROPS * 64u + 16u) : 0;
+        mc3_u8 *buf = mats ? (mc3_u8 *)r_alloc(HOOD_CHUNK + 512u) : 0;
         if (!buf) { MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h); s->prop_error = 3u; s->prop_state = 9u; return; }
         const mc3_u32 tb = ((mc3_u32)tab + 15u) & ~15u;
         if (!read_exact(h, (void *)tb, count * 8u)) {
@@ -1992,7 +2302,7 @@ static void step_props() {
         hd->buf_mem = (mc3_u32)buf;
         hd->buf = (mc3_u8 *)(((mc3_u32)buf + 15u) & ~15u);
         hd->stream = 0;
-        if (!hood_open(prop_file(), prop_file() + 15)) {        // "" suffix
+        if (!hood_open(prop_file(), empty_suffix())) {
             s->prop_error = 5u; s->prop_state = 9u; return;
         }
         s->prop_state = 1u;
@@ -2005,7 +2315,7 @@ static void step_props() {
         hd->stream = 0;
         MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->amb_stream);
         s->amb_stream = 0;
-        mc3_free((void *)hd->buf_mem);
+        r_free((void *)hd->buf_mem);
         hd->buf_mem = 0;
         if (r < 0) { s->prop_error = 6u; s->prop_state = 9u; return; }
         s->props_ready = 1u;
@@ -2018,6 +2328,239 @@ static void step_props() {
 
 // Queue one placed prop: its matrix, then per packet the texture and the
 // MOD0's own VIF stream. Skipped whole when its uploads do not fit.
+
+// ---------------------------------------------------------------------------
+// Car against MC2 props. The props are ours (the MC3 prop manager never heard
+// of them), so the knock is ours too: the player's position and velocity come
+// from mcPlayer::GetPlayer(0) 0x514530, mcRacer::GetPosition 0x51B810 and
+// mcRacer::ObstacleVelocity 0x51B850 (the chain digital_speedometer reads).
+// A prop within reach of a car moving faster than 1.5 m/s takes the velocity
+// of an elastic hit (2 m_car / (m_car + m_prop), damped), tips over its base
+// towards the hit, falls, lands at its own base height and slides to rest.
+// The car loses a share of its speed by the prop's mass. Props >= 1000 kg do
+// not move. Marker RPHT <prop> <props hit so far>.
+// ---------------------------------------------------------------------------
+enum { PLAYER_GET = 0x00514530, RACER_POSITION = 0x0051B810, RACER_VELOCITY = 0x0051B850 };
+static inline float fsqrt(float x) { float r; __asm__("sqrt.s %0, %1" : "=f"(r) : "f"(x)); return r; }
+// sin/cos for 0..pi/2 (Taylor, error < 1e-4 there)
+static void sincos_q(float a, float *sn, float *cs) {
+    const float a2 = a * a;
+    *sn = a * (ffrom(0x3F800000u) - a2 * (ffrom(0x3E2AAAABu) - a2 * (ffrom(0x3C088889u) - a2 * ffrom(0x39500D01u))));
+    *cs = ffrom(0x3F800000u) - a2 * (ffrom(0x3F000000u) - a2 * (ffrom(0x3D2AAAABu) - a2 * (ffrom(0x3AB60B61u) - a2 * ffrom(0x37D00D01u))));
+}
+// v rotated by `angle` about the unit axis k (Rodrigues)
+static void rotate_vec(const float *v, const float *k, float sn, float cs, float *out) {
+    const float kx = k[0], ky = k[1], kz = k[2];
+    const float cx = ky * v[2] - kz * v[1], cy = kz * v[0] - kx * v[2], cz = kx * v[1] - ky * v[0];
+    const float d = (kx * v[0] + ky * v[1] + kz * v[2]) * (ffrom(0x3F800000u) - cs);
+    out[0] = v[0] * cs + cx * sn + kx * d;
+    out[1] = v[1] * cs + cy * sn + ky * d;
+    out[2] = v[2] * cs + cz * sn + kz * d;
+}
+static int player_motion(float **pos, float **vel) {
+    const mc3_u32 player = MC3_CALL1(mc3_u32, PLAYER_GET, int)(0);
+    if (!ptr(player) || !ptr(word(player + 20u)) || !ptr(word(word(player + 20u) + 4u))) return 0;
+    const mc3_u32 p = MC3_CALL1(mc3_u32, RACER_POSITION, mc3_u32)(player);
+    const mc3_u32 v = MC3_CALL1(mc3_u32, RACER_VELOCITY, mc3_u32)(player);
+    if (!ptr(p) || !ptr(v)) return 0;
+    // GetPosition answers the car instance's Matrix34 (instance +0x10, the
+    // matrix AlgumCorrupto's FlyHack reads); the translation is its 4th row
+    *pos = (float *)(p + 36u); *vel = (float *)v;
+    return 1;
+}
+// The velocity player_motion hands out is phInertialCS+64 (ObstacleVelocity =
+// *(*(sim+104)+12) + 64); the body keeps its momentum and derives that field
+// from it every step, so writing it changes nothing - the car went straight
+// through palms and trees (player's pins, 2026-09-27). phInertialCS::
+// SetVelocity (0x57C108) sets both.
+enum { INERTIAL_SET_VELOCITY_PROPS = 0x0057C108 };
+static void apply_car_velocity(float *car_vel) {
+    float v[4];
+    v[0] = car_vel[0]; v[1] = car_vel[1]; v[2] = car_vel[2]; v[3] = ffrom(0u);
+    MC3_CALL2(void, INERTIAL_SET_VELOCITY_PROPS, mc3_u32, mc3_u32)((mc3_u32)car_vel - 64u, (mc3_u32)v);
+}
+// Out of a trunk: with the throttle down the engine gives back ~2 m/s every
+// frame, so a velocity change alone let the car creep 10 cm per frame through
+// the trunk. When it is inside, the car is moved back to the edge the way the
+// AI respawn moves cars - aiBrain::TeleportCar (0x3FC600) with a fake brain
+// (brain+12 -> opponent, opponent+36 -> car): Reposition, phLevel update and
+// the velocity, all at once.
+static void push_car_out(float nx, float nz, const float *vel) {
+    State *s = st();
+    const mc3_u32 player = MC3_CALL1(mc3_u32, PLAYER_GET, int)(0);
+    if (!ptr(player) || !ptr(word(player + 20u))) return;
+    const mc3_u32 car = word(player + 20u);
+    if (!ptr(word(car + 0x18u))) return;
+    const float *cm = (const float *)(word(car + 0x18u) + 0x10u);
+    float m[12], v[4];
+    for (int k = 0; k < 12; ++k) m[k] = cm[k];
+    m[9] = nx; m[11] = nz;
+    v[0] = vel[0]; v[1] = vel[1]; v[2] = vel[2]; v[3] = ffrom(0u);
+    s->push_opp[9] = car;
+    s->push_brain[3] = (mc3_u32)&s->push_opp[0];
+    MC3_CALL3(void, 0x003FC600, mc3_u32, mc3_u32, mc3_u32)
+        ((mc3_u32)&s->push_brain[0], (mc3_u32)m, (mc3_u32)v);
+}
+static void hit_prop(mc3_u32 i, float *car_vel, float speed) {
+    State *s = st();
+    const mc3_u32 *rec = (const mc3_u32 *)(s->prop_records + i * 20u);
+    const PropType *t = &s->prop_types[rec[4]];
+    DynProp *d = &s->dyn[s->dyn_next];
+    s->dyn_next = (s->dyn_next + 1u) % MAX_DYN_PROPS;   // oldest slot: that prop stays where it lies
+    float *m = (float *)(s->prop_matrices + i * 64u);
+    const float inv = ffrom(0x3F800000u) / speed;
+    const float dx = car_vel[0] * inv, dz = car_vel[2] * inv;
+    const float k = ffrom(0x40000000u) * ffrom(0x44BB8000u) / (ffrom(0x44BB8000u) + t->mass) * ffrom(0x3F333333u);
+    d->index = i; d->state = 1u;
+    for (int a = 0; a < 3; ++a) {
+        d->pos[a] = m[12 + a];
+        d->rot0[a] = m[a]; d->rot0[3 + a] = m[4 + a]; d->rot0[6 + a] = m[8 + a];
+    }
+    d->base_y = m[13];
+    d->vel[0] = car_vel[0] * k; d->vel[2] = car_vel[2] * k;
+    d->vel[1] = speed * ffrom(0x3DF5C28Fu);
+    d->axis[0] = dz; d->axis[1] = ffrom(0u); d->axis[2] = -dx;
+    d->angle = ffrom(0u);
+    float w = speed * ffrom(0x3EB33333u);
+    if (w < ffrom(0x40200000u)) w = ffrom(0x40200000u);
+    if (w > ffrom(0x41100000u)) w = ffrom(0x41100000u);
+    d->omega = w;
+    // the car gives up part of its speed to the prop
+    const float keep = ffrom(0x3F800000u) - ffrom(0x3F19999Au) * t->mass / (ffrom(0x44BB8000u) + t->mass);
+    car_vel[0] *= keep; car_vel[2] *= keep;
+    apply_car_velocity(car_vel);
+    s->prop_moved[i] = 1u;
+    ++s->props_hit;
+    mark('R','P','H','T', i, s->props_hit);
+    mark('R','P','H','2', rec[4] | ((mc3_u32)t->mass << 16), fbits(speed));
+    mark('R','P','H','3', fbits(d->pos[0]), fbits(d->pos[2]));
+}
+// [boot] mc2h = 1 (diagnostic): at the start line, line up the three movable
+// props nearest to the car 12, 20 and 28 m ahead of it, to drive into.
+static void line_up_test_props(const float *cp) {
+    State *s = st();
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','h'));
+    if (!v || v[0] != '1' || s->props_hit || s->dyn_next) return;
+    // forward = -row 2 of the car's Matrix34 (rows of three floats; cp is row 3)
+    const float fx = -cp[-3], fz = -cp[-1];
+    mc3_u32 used[3] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+    for (int k = 0; k < 3; ++k) {
+        float best = ffrom(0x7F000000u);
+        for (mc3_u32 i = 0; i < s->prop_count; ++i) {
+            if (i == used[0] || i == used[1]) continue;
+            const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+            if (t->gfx_only || !t->has_phys || t->fixed || t->fixed_object || t->drivable) continue;
+            const float *m = (const float *)(s->prop_matrices + i * 64u);
+            const float dx = m[12] - cp[0], dz = m[14] - cp[2], d2 = dx * dx + dz * dz;
+            if (d2 < best) { best = d2; used[k] = i; }
+        }
+        if (used[k] == 0xFFFFFFFFu) return;
+        float *m = (float *)(s->prop_matrices + used[k] * 64u);
+        const float dist = ffrom(0x41400000u) + ffrom(0x41000000u) * (float)k;   // 12, 20, 28
+        m[12] = cp[0] + fx * dist; m[13] = cp[1]; m[14] = cp[2] + fz * dist;
+        float *rec = (float *)(s->prop_records + used[k] * 20u);
+        rec[0] = m[12]; rec[1] = m[13]; rec[2] = m[14];
+        mark('R','P','L','U', used[k], ((const mc3_u32 *)(s->prop_records + used[k] * 20u))[4]);
+    }
+    s->dyn_next = MAX_DYN_PROPS - 1u;          // once (dyn_next != 0 from here on)
+}
+static void step_prop_physics() {
+    State *s = st();
+    float *cp, *cv;
+    if (player_motion(&cp, &cv)) {
+        line_up_test_props(cp);
+        const float speed = fsqrt(cv[0] * cv[0] + cv[2] * cv[2]);
+        if (speed > ffrom(0x3FC00000u)) {
+            const float range = ffrom(0x40C00000u);
+            for (mc3_u32 i = 0; i < s->prop_count; ++i) {
+                if (s->prop_moved[i]) continue;
+                const float *m = (const float *)(s->prop_matrices + i * 64u);
+                const float dx = m[12] - cp[0], dz = m[14] - cp[2], dy = m[13] - cp[1];
+                if (dx > range || dx < -range || dz > range || dz < -range) continue;
+                if (dy > ffrom(0x40800000u) || dy < -ffrom(0x40800000u)) continue;
+                const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+                if (t->gfx_only || t->drivable) continue;
+                const int solid = t->fixed_object || t->fixed;
+                // a movable prop needs its .phys (mass); a FixedObject one
+                // does not - palms and most trees have none, and the car
+                // drove through them (player's pins, 2026-09-27)
+                if (!solid && !t->has_phys) continue;
+                // a circle stands for the prop; for a big fixed one (container,
+                // ramp, crane) it would be wrong, so those are left alone -
+                // except trees and palms, whose big sphere is the canopy:
+                // they are a trunk of 0.45 m
+                if (solid && t->radius > ffrom(0x41000000u) && !t->trunk) continue;
+                float r = t->radius * ffrom(0x3E99999Au);
+                if (r < ffrom(0x3E99999Au)) r = ffrom(0x3E99999Au);
+                if (r > ffrom(0x3F99999Au)) r = ffrom(0x3F99999Au);
+                if (t->trunk) r = ffrom(0x3EE66666u);
+                r += ffrom(0x3F8CCCCDu);
+                const float d2 = dx * dx + dz * dz;
+                if (d2 > r * r) continue;
+                const float into = dx * cv[0] + dz * cv[2];
+                if (into <= ffrom(0u)) continue;   // moving away from it
+                if (solid) {
+                    // take the velocity into the prop away, with a little bounce
+                    // head-on (within ~45 degrees): the car stops with a
+                    // small bounce, as against MC3's own poles; a glancing
+                    // blow only loses the part of the velocity into it
+                    const float dl = fsqrt(d2);
+                    if (into > ffrom(0x3F333333u) * dl * speed) {
+                        const float back = speed * ffrom(0x3E4CCCCDu) / dl;
+                        cv[0] = -dx * back; cv[2] = -dz * back;
+                    } else {
+                        const float k = into / d2 * ffrom(0x3F99999Au);
+                        cv[0] -= dx * k; cv[2] -= dz * k;
+                    }
+                    apply_car_velocity(cv);
+                    const float dl2 = fsqrt(d2);
+                    if (dl2 < r * ffrom(0x3F733333u) && dl2 > ffrom(0x3C23D70Au)) {
+                        // inside the trunk: back to its edge (0.95 r deep or more)
+                        const float out = (r - dl2) / dl2;
+                        push_car_out(cp[0] - dx * out, cp[2] - dz * out, cv);
+                    }
+                    if (s->solid_hits++ < 40u) {
+                        mark('R','P','S','O', i | (((const mc3_u32 *)(s->prop_records + i * 20u))[4] << 16), fbits(speed));
+                        mark('R','P','S','P', fbits(cp[0]), fbits(cp[2]));
+                    }
+                    continue;
+                }
+                hit_prop(i, cv, speed);
+            }
+        }
+    }
+    const float dt = ffrom(0x3D088889u);
+    for (mc3_u32 j = 0; j < MAX_DYN_PROPS; ++j) {
+        DynProp *d = &s->dyn[j];
+        if (d->state != 1u) continue;
+        d->vel[1] -= ffrom(0x411CCCCDu) * dt;
+        for (int a = 0; a < 3; ++a) d->pos[a] += d->vel[a] * dt;
+        int ground = 0;
+        if (d->pos[1] <= d->base_y) {
+            ground = 1;
+            d->pos[1] = d->base_y;
+            d->vel[1] = d->vel[1] < ffrom(0u) ? -d->vel[1] * ffrom(0x3E4CCCCDu) : d->vel[1];
+            if (d->vel[1] < ffrom(0x3F800000u)) d->vel[1] = ffrom(0u);
+            const float f = ffrom(0x3F800000u) - ffrom(0x40400000u) * dt;
+            d->vel[0] *= f; d->vel[2] *= f;
+        }
+        d->angle += d->omega * dt;
+        if (d->angle >= ffrom(0x3FC90FDAu)) { d->angle = ffrom(0x3FC90FDAu); d->omega = ffrom(0u); }
+        float sn, cs;
+        sincos_q(d->angle, &sn, &cs);
+        float *m = (float *)(s->prop_matrices + d->index * 64u);
+        for (int row = 0; row < 3; ++row) rotate_vec(&d->rot0[row * 3], d->axis, sn, cs, &m[row * 4]);
+        for (int a = 0; a < 3; ++a) m[12 + a] = d->pos[a];
+        float *rec = (float *)(s->prop_records + d->index * 20u);
+        rec[0] = d->pos[0]; rec[1] = d->pos[1]; rec[2] = d->pos[2];
+        const float v2 = d->vel[0] * d->vel[0] + d->vel[2] * d->vel[2];
+        if (ground && d->omega == ffrom(0u) && v2 < ffrom(0x3D4CCCCDu) * ffrom(0x3D4CCCCDu)) {
+            d->state = 0u;
+            mark('R','P','R','S', d->index, fbits(d->angle));
+            mark('R','P','R','2', fbits(d->pos[0]), fbits(d->pos[2]));
+        }
+    }
+}
 static void queue_prop(mc3_u32 i, mc3_u32 arena, int lod2) {
     State *s = st();
     const mc3_u32 *rec = (const mc3_u32 *)(s->prop_records + i * 20u);
@@ -2052,6 +2595,30 @@ static int pcp_needed(mc3_u32 i) {
 // 3 MB in LA) and the CPP0 palette. cpvs_table[i] packs, for kept entry i,
 // offset/16 (bits 0..17) and length/16 (bits 18..30) - file offsets while the
 // directory is read, offsets into the compact copy once it is loaded.
+// The frame alpha the reflective ground (`_0_refl` pieces) writes, 0..128:
+// [boot] mc2a, default 10 (the user's pick against retail; 78 = m_roadShiniess x 128 was too strong).
+static mc3_u32 road_alpha() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','a'));
+    mc3_u32 n = 0; int any = 0;
+    while (v && *v >= '0' && *v <= '9') { n = n * 10u + (mc3_u32)(*v++ - '0'); any = 1; }
+    return any && n <= 128u ? n : 10u;
+}
+// [boot] mc2u: how much of MC2's texture WETNESS reaches the reflection mask.
+// MC2's ground textures carry, in their alpha, how wet each texel is, per
+// weather: clear asphalt 0, cloudy up to 29 (mean 7), rainy up to 104-128
+// (mean 25-40, the puddles) - measured in LA's nine banks. 0..128, default 128
+// (as MC2); 0 = off (only the flat mc2a).
+static mc3_u32 wet_scale() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','u'));
+    mc3_u32 n = 0; int any = 0;
+    while (v && *v >= '0' && *v <= '9') { n = n * 10u + (mc3_u32)(*v++ - '0'); any = 1; }
+    return any && n <= 128u ? n : 128u;
+}
+// [boot] mc2k = 0: the card reflections are not drawn (see reflect_mask_pass)
+static int cards_enabled() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','k'));
+    return !v || v[0] != '0';
+}
 static void step_cpvs() {
     State *s = st();
     mc3_u8 scratch[2048] __attribute__((aligned(16)));
@@ -2073,7 +2640,7 @@ static void step_cpvs() {
             read_exact(h, header, 8u) && le32(header) == RSC0 ? le32(header + 4u) : 0u;
         mc3_u8 *table = count && count <= MAX_CPVS_ENTRIES &&
             8u + count * 8u < (mc3_u32)size && heap_room(count * 4u + 16u)
-            ? (mc3_u8 *)mc3_alloc(count * 4u + 16u) : 0;
+            ? (mc3_u8 *)r_alloc(count * 4u + 16u) : 0;
         if (!table) {
             s->cpvs_error = count ? 3u : 2u;
             s->cpvs_bytes = (mc3_u32)size;
@@ -2129,7 +2696,7 @@ static void step_cpvs() {
                                !(table[s->cpvs_palette_index] & 0x80000000u)))
             s->cpvs_error = 6u;
         mc3_u8 *mem = !s->cpvs_error && heap_room(kept + 16u)
-            ? (mc3_u8 *)mc3_alloc(kept + 16u) : 0;
+            ? (mc3_u8 *)r_alloc(kept + 16u) : 0;
         if (!mem) {
             if (!s->cpvs_error) s->cpvs_error = 7u;
             s->cpvs_bytes = kept;
@@ -2184,16 +2751,26 @@ static void step_cpvs() {
     }
     const mc3_u32 palette_at = s->cpvs +
         ((table[s->cpvs_palette_index] & 0x3FFFFu) << 4);
-    mc3_u8 *pm = heap_room(1072u) ? (mc3_u8 *)mc3_alloc(16u + 1040u + 16u) : 0;
+    // Three copies of the palette, differing only in ALPHA: MC2's own (0x80)
+    // for drawing, the road's flat reflectivity (road_alpha()) and the scale of
+    // the texture wetness (wet_scale()), the last two for the alpha-only pass
+    // that tells MC3 where reflections may show (reflect_mask_pass).
+    mc3_u8 *pm = heap_room(3200u) ? (mc3_u8 *)r_alloc(3u * (16u + 1040u) + 16u) : 0;
     if (!pm) { s->cpvs_error = 11u; s->cpvs_state = 3u; return; }
     const mc3_u32 pk = ((mc3_u32)pm + 15u) & ~15u;
-    mc3_u32 *w = (mc3_u32 *)pk;
-    w[0] = 65u; w[1] = VCLQ; w[2] = 0u; w[3] = 1040u;
-    w[4] = VIF_FLUSH;
-    w[5] = 0x6E000000u | 768u;       // UNPACK V4-8 x256 -> VU 768, the palette
-    for (mc3_u32 i = 0; i < 256u; ++i) w[6u + i] = word(palette_at + i * 4u);
-    w[262] = 0u; w[263] = 0u;
+    for (mc3_u32 k = 0; k < 3u; ++k) {
+        mc3_u32 *w = (mc3_u32 *)(pk + k * 1056u);
+        const mc3_u32 alpha = k == 2u ? wet_scale() : k ? road_alpha() : 0x80u;   // 0: MC2's own
+        w[0] = 65u; w[1] = VCLQ; w[2] = 0u; w[3] = 1040u;
+        w[4] = VIF_FLUSH;
+        w[5] = 0x6E000000u | 768u;       // UNPACK V4-8 x256 -> VU 768, the palette
+        for (mc3_u32 i = 0; i < 256u; ++i)
+            w[6u + i] = (word(palette_at + i * 4u) & 0x00FFFFFFu) | (alpha << 24);
+        w[262] = 0u; w[263] = 0u;
+    }
     s->palette = pk;
+    s->palette_refl = pk + 1056u;
+    s->palette_wet = pk + 2112u;
     s->cpvs_state = 2u;
     mark('R','C','P','S', s->cpvs_count, s->cpvs_kept);
     mark('R','H','E','P', mc3_heap_free(mc3_heap_active()), 2u);
@@ -2310,26 +2887,59 @@ static int boot_int(mc3_u32 id, int *out) {
     *out = sign * n;
     return any;
 }
-extern "C" void set_camera_hook(mc3_u32 camera) {
-    {
-        int x, y, z;
-        if (ptr(camera) && boot_int(MC3_ID('m','c','2','x'), &x) &&
-            boot_int(MC3_ID('m','c','2','y'), &y) && boot_int(MC3_ID('m','c','2','z'), &z)) {
-            float *pos = (float *)(camera + 36u);
-            pos[0] = (float)x; pos[1] = (float)y; pos[2] = (float)z;
-            int down;
-            if (boot_int(MC3_ID('m','c','2','d'), &down) && down) {
-                // look straight down: right +X, up -Z, back +Y
-                float *m = (float *)camera;
-                m[0] = 1.0f; m[1] = 0.0f; m[2] = 0.0f;
-                m[3] = 0.0f; m[4] = 0.0f; m[5] = -1.0f;
-                m[6] = 0.0f; m[7] = 1.0f; m[8] = 0.0f;
-            }
-        }
-    }
-    MC3_CALL1(void, SET_CAMERA, mc3_u32)(camera);
+// Close every stream, free every block, and go back to the state the module
+// had when it was loaded (all of State zero). Runs when the loaded race is not
+// in Los Angeles any more.
+static void release_all() {
     State *s = st();
-    s->camera = camera;
+    if (s) {
+        const mc3_u32 streams[5] = { s->rsc_stream, s->shared_stream, s->amb_stream,
+                                     s->cpvs_stream, s->hood.stream };
+        for (int i = 0; i < 5; ++i)
+            if (streams[i]) MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(streams[i]);
+    }
+    Tracked *t = trk();
+    const mc3_u32 blocks = t->n;
+    while (t->n) mc3_free((void *)t->ptr[--t->n]);
+    if (*state_mem_slot()) {
+        mc3_free((void *)*state_mem_slot());
+        *state_mem_slot() = 0u;
+        *state_slot() = 0;
+    }
+    t->dropped = 0; t->retry = 0;
+    mark('R','R','E','L', blocks, mc3_heap_largest(mc3_heap_active()));
+}
+
+// In a race (or its replay) in Los Angeles. City = mcRaceConfig current +0 (the
+// menu edits another config, 0x619B18). Game state = gGameState (0x6199F0)
+// +4, as mcGameState::ChangeState 0x1A55D0 stores it: 2 game, 3 replay,
+// 5 garage, 7 front end. The front end reloads the last city as its
+// background - Los Angeles after an arcade race - and with our ~11 MB resident
+// its menu never came up, so the front end gets the heap back.
+static int in_mc2_city() {
+    const mc3_u32 cfg = *(volatile mc3_u32 *)RACE_CONFIG_CURRENT;
+    const mc3_u32 gs = *(volatile mc3_u32 *)GAME_STATE;
+    if (!ptr(cfg) || !ptr(gs)) return 0;
+    const mc3_u32 state = *(volatile mc3_u32 *)(gs + 4u);
+    return mc2_city_supported(*(volatile mc3_u32 *)cfg) && (state == 2u || state == 3u);
+}
+
+// Nothing left for load_step to do: the props are in (they come last) or a
+// stage failed for good (memory errors 3/5 are retried, so they do not count).
+static int load_finished() {
+    State *s = st();
+    if (s->prop_state >= 2u) return 1;
+    if (s->manifest_error || s->rsc_error || s->bootstrap_error || s->instances_error) return 1;
+    if (s->texture_error && s->texture_error != 3u && s->texture_error != 5u) return 1;
+    return 0;
+}
+
+// One slice of the city load: catalog, geometry, textures, hoods, CPVS and
+// props, each a bounded amount of work. Called once per frame by the camera
+// hook, and in a loop by preload_city before the race starts. Returns 1 when
+// there is nothing left to load (done or failed for good).
+static int load_step() {
+    State *s = st();
     if (!s->heap_reported) {
         s->heap_reported = 1u;
         mark('R','H','E','P', mc3_heap_free(mc3_heap_active()), 0u);
@@ -2381,7 +2991,7 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
         if (s->rsc_state == 1u && s->load_index == s->target_count) {
             // the rest of the file may still hold texture entries
             const int r = s->tex_dest ? consume_to(s->rsc_size, 0x20000u) : 1;
-            if (r == 0) return;
+            if (r == 0) return 0;
             if (r < 0) s->texture_error = 4u;
             close_rsc_stream(s);
             s->rsc_state = 2u;
@@ -2409,8 +3019,889 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
         s->rsc_reported = 1u;
         mark('R','S','C','E', s->rsc_error, s->load_index);
     }
-    if (!s->manifest_ready || !s->bootstrap || !s->textures_ready ||
-        !s->frame_ready || !update_view_projection()) return;
+    return load_finished();
+}
+
+
+// ---------------------------------------------------------------------------
+// [boot] mc2s = N (diagnostic): the camera chases the AI opponents instead of
+// the player, N seconds each (default 15), so whole races can be watched and
+// photographed around the map. Same idea as the Orbit mode of AlgumCorrupto's
+// freecam (CinematicClub): every car is an instance with vtable 0x00627630,
+// Matrix34 at +0x10 (translation +0x34); the player's own is *(player+20)+0x18
+// and is skipped. The heap is scanned once when the list is empty or stale.
+// Camera = look-at from 7 m behind and 2.5 m above the car (rows right, up,
+// back, then the eye at +36, as mcCamera keeps it). Marker RSPC <cars> <shown>.
+// ---------------------------------------------------------------------------
+enum { CAR_VTABLE = 0x00627630 };
+static int spectate_seconds() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','s'));
+    if (!v || v[0] < '1' || v[0] > '9') return 0;
+    int n = 0;
+    while (*v >= '0' && *v <= '9') n = n * 10 + (*v++ - '0');
+    return n > 1 ? n : 15;
+}
+// mc2s = <N>f: the player's car hangs 30 m above the watched opponent, every
+// frame, so the opponents are never far from the player (test for whatever in
+// the game depends on the distance to the player: physics/LOD of far cars, the
+// stacking at shortcut nodes). The car is moved the way the AI respawn moves
+// its own: aiBrain::TeleportCar (0x3FC600) takes the brain and reads only
+// brain+12 -> opponent, opponent+36 -> car (mcCarSim::Reposition, phLevel
+// UpdateObject, SetVelocity), so a two-word fake brain pointing at the
+// player's car (*(player+20)) is enough. Marker RFOL <moves> <car>.
+// mc2s = <N>t: watch the AMBIENT TRAFFIC cars instead of the opponents -
+// aiAmbientTraffic (*0x6157C4)+8 -> aiAmbientTrafficData: +300 count, +304
+// array of aiAmbientVehicle, 560 bytes each, current rail pointer at +264
+// (zero = not placed), position at +100. Marker RSPT <placed> <shown index>.
+static int spectate_traffic() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','s'));
+    if (!v) return 0;
+    while (*v >= '0' && *v <= '9') ++v;
+    return *v == 't';
+}
+static int spectate_traffic_follow() {       // mc2s = <N>tf
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','s'));
+    if (!v) return 0;
+    while (*v >= '0' && *v <= '9') ++v;
+    return v[0] == 't' && v[1] == 'f';
+}
+static void follow(const float *opp);
+static int traffic_car(mc3_u32 k, float *pos, mc3_u32 *rail_out, mc3_u32 *ped_out) {
+    *rail_out = 0xFFFFFFFFu;
+    *ped_out = 0x0000FFFFu;
+    const mc3_u32 traffic = word(0x006157C4u);
+    if (!ptr(traffic) || !ptr(word(traffic + 8u))) return 0;
+    const mc3_u32 data = word(traffic + 8u);
+    const int n = *(volatile short *)(data + 300u);
+    const mc3_u32 arr = word(data + 304u);
+    if (!ptr(arr) || n <= 0 || n > 64) return 0;
+    const mc3_u32 net = word(0x0061B170u);
+    const mc3_u32 base = ptr(net) ? word(net + 60u) : 0u;
+    const mc3_u32 count = ptr(net) ? *(volatile mc3_u16 *)(net + 56u) : 0u;
+    mc3_u32 placed = 0, want = 0xFFFFFFFFu, ped = 0, first_ped = 0xFFFFu;
+    for (int i = 0; i < n; ++i) {
+        const mc3_u32 current = word(arr + 560u * (mc3_u32)i + 264u);
+        if (ptr(current)) {
+            if (placed == k % 64u) want = (mc3_u32)i;
+            ++placed;
+            if (ptr(base) && current >= base && current < base + count * 20u && ((current - base) % 20u) == 0u) {
+                const mc3_u32 rail_id = (current - base) / 20u;
+                if (*(volatile mc3_u8 *)(current + 18u) & 8u) {
+                    if (!ped) first_ped = rail_id;
+                    ++ped;
+                }
+            }
+        }
+    }
+    *ped_out = (ped << 16) | first_ped;
+    if (!placed) return 0;
+    if (want == 0xFFFFFFFFu) {                  // k past the placed ones: wrap
+        mc3_u32 c = 0;
+        for (int i = 0; i < n; ++i)
+            if (ptr(word(arr + 560u * (mc3_u32)i + 264u)) && c++ == k % placed) want = (mc3_u32)i;
+    }
+    const float *p = (const float *)(arr + 560u * want + 100u);
+    const mc3_u32 rail = word(arr + 560u * want + 264u);
+    if (ptr(base) && rail >= base && rail < base + count * 20u && ((rail - base) % 20u) == 0u)
+        *rail_out = (rail - base) / 20u;
+    pos[0] = p[0]; pos[1] = p[1]; pos[2] = p[2];
+    return (int)placed;
+}
+static int spectate_follow() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','s'));
+    if (!v) return 0;
+    while (*v >= '0' && *v <= '9') ++v;
+    return *v == 'f';
+}
+// mc2s = <N>c: CHASE - the player's car is put 14 m behind the watched opponent,
+// on the ground, every frame, and the game's own camera is left alone. Unlike
+// the modes above, what MC3 culls is then decided from the camera that draws:
+// mcGame::PreDraw builds the occluder viewer and the cull frustum from the
+// local player's camera, not from the camera this renderer is handed.
+static int spectate_chase() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','s'));
+    if (!v) return 0;
+    while (*v >= '0' && *v <= '9') ++v;
+    return *v == 'c';
+}
+enum { AI_TELEPORT_CAR = 0x003FC600, INERTIAL_SET_VELOCITY = 0x0057C108 };
+static void follow_at(const float *opp, float up, float back);
+static void follow(const float *opp) { follow_at(opp, ffrom(0x41F00000u), ffrom(0u)); }   // 30 m up
+static void follow_at(const float *opp, float up, float back) {
+    State *s = st();
+    const mc3_u32 player = MC3_CALL1(mc3_u32, PLAYER_GET, int)(0);
+    if (!ptr(player) || !ptr(word(player + 20u))) return;
+    const mc3_u32 car = word(player + 20u);
+    s->follow_opp[9] = car;                                  // opponent+36 -> car
+    s->follow_brain[3] = (mc3_u32)&s->follow_opp[0];         // brain+12 -> opponent
+    float m[12], vel[4];
+    for (int i = 0; i < 12; ++i) m[i] = opp[i];
+    // rows right, up, back: `back` metres along the back row, `up` metres up
+    m[9] = opp[9] + opp[6] * back;
+    m[10] = opp[10] + opp[7] * back + up;
+    m[11] = opp[11] + opp[8] * back;
+    vel[0] = vel[1] = vel[2] = vel[3] = ffrom(0u);
+    MC3_CALL3(void, AI_TELEPORT_CAR, mc3_u32, mc3_u32, mc3_u32)
+        ((mc3_u32)&s->follow_brain[0], (mc3_u32)m, (mc3_u32)vel);
+    if ((s->follow_count++ % 150u) == 0u) {
+        // opponent x,z and y*16, then the player's instance after the move
+        const float *mine = (const float *)(word(car + 0x18u) + 0x10u);
+        mark('R','F','O','L', (mc3_u32)(int)opp[9], (mc3_u32)(int)opp[11]);
+        mark('R','F','O','Y', (mc3_u32)(int)(opp[10] * ffrom(0x41800000u)),
+             (mc3_u32)(int)(mine[10] * ffrom(0x41800000u)));
+        mark('R','F','P','L', (mc3_u32)(int)mine[9], (mc3_u32)(int)mine[11]);
+    }
+}
+static void spectate_scan() {
+    State *s = st();
+    s->spec_count = 0;
+    const mc3_u32 player = MC3_CALL1(mc3_u32, PLAYER_GET, int)(0);
+    const mc3_u32 mine = ptr(player) && ptr(word(player + 20u)) ? word(word(player + 20u) + 0x18u) : 0u;
+    const mc3_u32 alloc = mc3_heap_active();
+    if (!mc3_ptr_ok(alloc)) return;
+    const mc3_u32 base = word(alloc + 4u), top = word(alloc + 8u);
+    if (!ptr(base) || top > 0x02000000u) return;
+    for (mc3_u32 a = base & ~15u; a < top && s->spec_count < 16u; a += 16u)
+        if (word(a) == CAR_VTABLE && a != mine) s->spec_inst[s->spec_count++] = a;
+    mark('R','S','P','C', s->spec_count, s->spec_current);
+}
+// Diagnostic, every 2 s: the watched car's aiOpponent (aiOpponentManager::
+// sm_Instance 0x618B68: count +0, array +8, 1136 bytes each; opponent+36 ->
+// car, car+24 -> instance), its aiStuck (opponent+116: state +8, count +20,
+// really-stuck flag +92) and aiBrain (opponent+120: state object +8 -> type
+// +8), with the car's position and up.y. Markers RAIS / RAIP / RAIU.
+enum { AI_MANAGER = 0x00618B68, AI_OPPONENT_SIZE = 1136 };
+static void spectate_ai_state(mc3_u32 inst) {
+    const mc3_u32 mgr = word(AI_MANAGER);
+    if (!ptr(mgr)) return;
+    const mc3_u32 n = word(mgr), arr = word(mgr + 8u);
+    if (!ptr(arr) || n > 16u) return;
+    for (mc3_u32 i = 0; i < n; ++i) {
+        const mc3_u32 opp = arr + i * AI_OPPONENT_SIZE;
+        const mc3_u32 car = word(opp + 36u);
+        if (!ptr(car) || word(car + 24u) != inst) continue;
+        const mc3_u32 stuck = word(opp + 116u), brain = word(opp + 120u);
+        const mc3_u32 st_state = ptr(stuck) ? word(stuck + 8u) : 0xEEu;
+        const mc3_u32 st_count = ptr(stuck) ? word(stuck + 20u) : 0xEEu;
+        const mc3_u32 st_really = ptr(stuck) ? (mc3_u32)*(const mc3_u8 *)(stuck + 92u) : 0xEEu;
+        const mc3_u32 bstate = ptr(brain) ? word(brain + 8u) : 0xEEu;
+        const float *m = (const float *)(inst + 0x10u);
+        mark('R','A','I','S', (i << 24) | (st_state << 16) | (st_count << 8) | st_really, bstate);
+        mark('R','A','I','P', (mc3_u32)(int)m[9], (mc3_u32)(int)m[11]);
+        mark('R','A','I','U', (mc3_u32)(int)(m[4] * ffrom(0x42C80000u)),
+             (mc3_u32)(int)(m[10] * ffrom(0x41800000u)));
+        return;
+    }
+    mark('R','A','I','S', 0xFFFFFFFFu, n);
+}
+// Record every opponent at the same 2 s interval. This catches stalls while
+// the spectator camera is watching a different car. RAAS packs opponent index,
+// aiStuck state/count/flag; RAAP is X/Z; RAAU is upright Y and height*16.
+static void spectate_all_ai_states() {
+    const mc3_u32 mgr = word(AI_MANAGER);
+    if (!ptr(mgr)) return;
+    const mc3_u32 n = word(mgr), arr = word(mgr + 8u);
+    if (!ptr(arr) || n > 16u) return;
+    for (mc3_u32 i = 0; i < n; ++i) {
+        const mc3_u32 opp = arr + i * AI_OPPONENT_SIZE;
+        const mc3_u32 car = word(opp + 36u);
+        const mc3_u32 inst = ptr(car) ? word(car + 24u) : 0u;
+        if (!ptr(inst) || word(inst) != CAR_VTABLE) continue;
+        const mc3_u32 stuck = word(opp + 116u);
+        const mc3_u32 st_state = ptr(stuck) ? word(stuck + 8u) : 0xEEu;
+        const mc3_u32 st_count = ptr(stuck) ? word(stuck + 20u) : 0xEEu;
+        const mc3_u32 st_really = ptr(stuck) ? (mc3_u32)*(const mc3_u8 *)(stuck + 92u) : 0xEEu;
+        const float *m = (const float *)(inst + 0x10u);
+        mark('R','A','A','S', (i << 24) | (st_state << 16) | (st_count << 8) | st_really, 0u);
+        mark('R','A','A','P', (mc3_u32)(int)m[9], (mc3_u32)(int)m[11]);
+        mark('R','A','A','U', (mc3_u32)(int)(m[4] * ffrom(0x42C80000u)),
+             (mc3_u32)(int)(m[10] * ffrom(0x41800000u)));
+        // What the AI is trying to do: aiOpponent+152 = aiTarget position (the
+        // point the steering aims at), +232 = its speed (m/s); aiBrain+168 =
+        // the brain's target position, +228 = the speed it asks for. Integers
+        // in metres (speeds x 10). RAAT <opp | target x, z> <brain target x, z>,
+        // RAAV <speed*10 | wanted*10> <target distance*10>.
+        const mc3_u32 brain = word(opp + 120u);
+        if (ptr(brain)) {
+            const float *t = (const float *)(opp + 152u), *bt = (const float *)(brain + 168u);
+            const float dx = t[0] - m[9], dz = t[2] - m[11];
+            mark('R','A','A','T', (i << 24) | (((mc3_u32)(int)t[0] & 0xFFFu) << 12) | ((mc3_u32)(int)t[2] & 0xFFFu),
+                 (((mc3_u32)(int)bt[0] & 0xFFFFu) << 16) | ((mc3_u32)(int)bt[2] & 0xFFFFu));
+            mark('R','A','A','V', (((mc3_u32)(int)(fword((const mc3_u32 *)(opp + 232u)) * ffrom(0x41200000u)) & 0xFFFFu) << 16) |
+                 ((mc3_u32)(int)(fword((const mc3_u32 *)(brain + 228u)) * ffrom(0x41200000u)) & 0xFFFFu),
+                 (mc3_u32)(int)(fsqrt(dx * dx + dz * dz) * ffrom(0x41200000u)));
+            // The path point the brain is heading for: aiBrain+160 -> aiPathGraph,
+            // +12 -> aiPathPoint (u16 road/intersection id at +0), and that
+            // road's centre (aiRoad +8, +12 = x, z). RAAG <car | road id>
+            // <centre x | centre z> (16 bit each; id 0xFFFF = none).
+            const mc3_u32 graph = word(brain + 160u);
+            const mc3_u32 point = ptr(graph) ? word(graph + 12u) : 0u;
+            const mc3_u32 road = ptr(point) ? *(const mc3_u16 *)point : 0xFFFFu;
+            const mc3_u32 net = word(0x0061B170u);
+            const mc3_u32 roads = ptr(net) ? word(net + 44u) : 0u;
+            const mc3_u32 nroads = ptr(net) ? (mc3_u32)*(const mc3_u16 *)(net + 40u) : 0u;
+            mc3_u32 pos = 0u;
+            if (ptr(roads) && road < nroads) {
+                const float *c = (const float *)(roads + road * 52u + 8u);
+                pos = (((mc3_u32)(int)c[0] & 0xFFFFu) << 16) | ((mc3_u32)(int)c[1] & 0xFFFFu);
+            }
+            mark('R','A','A','G', (i << 24) | road, pos);
+        }
+    }
+}
+static void look_at(mc3_u32 camera, const float *eye, const float *target);
+static void spectate(mc3_u32 camera, int seconds) {
+    State *s = st();
+    if (!ptr(camera)) return;
+    if (spectate_traffic()) {
+        const mc3_u32 k = s->spec_frame++ / ((mc3_u32)seconds * 30u);
+        float p[3];
+        mc3_u32 rail, ped;
+        const int placed = traffic_car(k, p, &rail, &ped);
+        if ((s->spec_frame % ((mc3_u32)seconds * 30u)) == 1u) {
+            mark('R','S','P','T', (mc3_u32)placed, k);
+            mark('R','S','P','A', (mc3_u32)placed, ped);
+            const mc3_u32 net = word(0x0061B170u);
+            const mc3_u32 count = ptr(net) ? *(volatile mc3_u16 *)(net + 56u) : 0u;
+            const mc3_u32 rails = ptr(net) ? word(net + 60u) : 0u;
+            const mc3_u32 record = ptr(rails) && rail < count ? rails + rail * 20u : 0u;
+            const mc3_u32 width = ptr(record) ? *(volatile mc3_u16 *)(record + 10u) : 0u;
+            const mc3_u32 flags = ptr(record) ? *(volatile mc3_u8 *)(record + 18u) : 0u;
+            mark('R','S','P','R', rail, (flags << 16) | width);
+        }
+        if (!placed) return;
+        if (spectate_traffic_follow()) {
+            float m[12];
+            for (int q = 0; q < 12; ++q) m[q] = ffrom(0u);
+            m[0] = m[4] = m[8] = ffrom(0x3F800000u);
+            m[9] = p[0]; m[10] = p[1]; m[11] = p[2];
+            follow(m);                                   // the player 30 m above it
+        }
+        float eye[3], at[3];
+        eye[0] = p[0] - ffrom(0x40C00000u); eye[1] = p[1] + ffrom(0x40800000u); eye[2] = p[2] - ffrom(0x40C00000u);
+        at[0] = p[0]; at[1] = p[1] + ffrom(0x3F800000u); at[2] = p[2];
+        look_at(camera, eye, at);
+        return;
+    }
+    const mc3_u32 every = (mc3_u32)seconds * 30u;
+    if (!s->spec_count || (s->spec_frame % every) == 0u ||
+        word(s->spec_inst[s->spec_current % (s->spec_count ? s->spec_count : 1u)]) != CAR_VTABLE) {
+        if ((s->spec_frame % every) == 0u && s->spec_frame) ++s->spec_current;
+        spectate_scan();
+    }
+    ++s->spec_frame;
+    if (!s->spec_count) return;
+    const float *car = (const float *)(s->spec_inst[s->spec_current % s->spec_count] + 0x10u);
+    if (spectate_follow()) follow(car);
+    if (spectate_chase()) {
+        follow_at(car, ffrom(0x3E99999Au), ffrom(0x41600000u));   // 0.3 m up, 14 m back
+        if ((s->spec_frame % 60u) == 1u) {
+            spectate_ai_state(s->spec_inst[s->spec_current % s->spec_count]);
+            spectate_all_ai_states();
+        }
+        return;                                            // the game's camera draws
+    }
+    if ((s->spec_frame % 60u) == 1u) {
+        spectate_ai_state(s->spec_inst[s->spec_current % s->spec_count]);
+        spectate_all_ai_states();
+    }
+    // car rows: right, up, back (the car drives along -back), position
+    const float fx = -car[6], fz = -car[8];
+    const float fl = fsqrt(fx * fx + fz * fz);
+    if (fl < ffrom(0x3C23D70Au)) return;
+    const float ex = car[9] - fx / fl * ffrom(0x40E00000u);          // 7 m behind
+    const float ey = car[10] + ffrom(0x40200000u);                    // 2.5 m up
+    const float ez = car[11] - fz / fl * ffrom(0x40E00000u);
+    const float tx = car[9], ty = car[10] + ffrom(0x3F4CCCCDu), tz = car[11];
+    float bx = ex - tx, by = ey - ty, bz = ez - tz;                   // back = eye - target
+    float bl = fsqrt(bx * bx + by * by + bz * bz);
+    bx /= bl; by /= bl; bz /= bl;
+    // right = up_world x back, up = back x right
+    float rx = bz, ry = ffrom(0u), rz = -bx;
+    const float rl = fsqrt(rx * rx + rz * rz);
+    rx /= rl; rz /= rl;
+    const float ux = by * rz - bz * ry, uy = bz * rx - bx * rz, uz = bx * ry - by * rx;
+    float *m = (float *)camera;
+    m[0] = rx; m[1] = ry; m[2] = rz;
+    m[3] = ux; m[4] = uy; m[5] = uz;
+    m[6] = bx; m[7] = by; m[8] = bz;
+    m[9] = ex; m[10] = ey; m[11] = ez;
+}
+
+
+// ---------------------------------------------------------------------------
+// [boot] mc2t = N (diagnostic): camera tour. host0:/mc2_camtour.txt holds one
+// point per line, "eye_x eye_y eye_z target_x target_y target_z" (a line
+// starting with '#' is skipped); the camera shows each for N seconds, in
+// order, and starts over. One boot photographs any list of places - the
+// ground-coverage clusters of mc2_ground_coverage.py, a grid over the city.
+// A target straight below the eye looks down with +x right, -z up. Marker
+// RTOU <index> <eye x|z as int16> at every switch (match to screenshots).
+// ---------------------------------------------------------------------------
+static __attribute__((noinline)) const char *tour_path() {
+    static const char s[] = "host0:/mc2_camtour.txt"; return s;
+}
+static int tour_seconds() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','t'));
+    if (!v || v[0] < '1' || v[0] > '9') return 0;
+    int n = 0;
+    while (*v >= '0' && *v <= '9') n = n * 10 + (*v++ - '0');
+    return n;
+}
+static void tour_load() {
+    State *s = st();
+    s->tour_state = 2u;
+    mc3_u32 bytes, mem;
+    const mc3_u32 text = read_whole(tour_path(), 0x40000u, &bytes, &mem);
+    if (!text) { mark('R','T','O','E', 1u, 0u); return; }
+    const char *p = (const char *)text, *end = p + bytes;
+    while (p < end && s->tour_count < MAX_TOUR_POINTS) {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
+        if (p >= end) break;
+        if (*p != '#') {
+            float *t = s->tour[s->tour_count];
+            for (int k = 0; k < 6; ++k) t[k] = parse_float(&p);
+            ++s->tour_count;
+        }
+        while (p < end && *p != '\n') ++p;
+    }
+    r_free((void *)mem);
+    mark('R','T','O','L', s->tour_count, bytes);
+}
+static void look_at(mc3_u32 camera, const float *eye, const float *target) {
+    float bx = eye[0] - target[0], by = eye[1] - target[1], bz = eye[2] - target[2];
+    const float bl = fsqrt(bx * bx + by * by + bz * bz);
+    if (bl < ffrom(0x3C23D70Au)) return;
+    bx /= bl; by /= bl; bz /= bl;
+    float rx = bz, ry = ffrom(0u), rz = -bx;
+    float rl = fsqrt(rx * rx + rz * rz);
+    if (rl < ffrom(0x3A83126Fu)) { rx = ffrom(0x3F800000u); rz = ffrom(0u); rl = rx; }
+    rx /= rl; rz /= rl;
+    const float ux = by * rz - bz * ry, uy = bz * rx - bx * rz, uz = bx * ry - by * rx;
+    float *m = (float *)camera;
+    m[0] = rx; m[1] = ry; m[2] = rz;
+    m[3] = ux; m[4] = uy; m[5] = uz;
+    m[6] = bx; m[7] = by; m[8] = bz;
+    m[9] = eye[0]; m[10] = eye[1]; m[11] = eye[2];
+}
+static void camera_tour(mc3_u32 camera, int seconds) {
+    State *s = st();
+    if (!ptr(camera)) return;
+    if (!s->tour_state) tour_load();
+    if (!s->tour_count) return;
+    const mc3_u32 i = (s->tour_frame++ / ((mc3_u32)seconds * 30u)) % s->tour_count;
+    const float *t = s->tour[i];
+    if (i != s->tour_shown || s->tour_frame == 1u) {
+        s->tour_shown = i;
+        mark('R','T','O','U', i, (((mc3_u32)(int)t[0] & 0xFFFFu) << 16) |
+                                 ((mc3_u32)(int)t[2] & 0xFFFFu));
+    }
+    look_at(camera, t, t + 3);
+}
+
+
+// ---------------------------------------------------------------------------
+// [boot] mc2g = F (diagnostic): collision drop test. host0:/mc2_droptest.txt
+// holds "x ground_y z [vx vz]" per line ('#' skipped; with a velocity the car
+// is thrown sideways - a wall test; mc2_ground_coverage.py writes
+// it). Once the city is loaded, the player's car is put 1.5 m above each point
+// (upright, still) with aiBrain::TeleportCar as in follow(), left to fall for
+// F frames, and where it ended up is logged: a car that went through the road
+// ends far below ground_y (or wherever the game respawns it). The camera
+// watches each drop from 20 m away. Markers RDRP <index> <final y * 16>,
+// RDRX <final x> <final z>, RDRE <points> when done (then the tour stops).
+// ---------------------------------------------------------------------------
+static __attribute__((noinline)) const char *drop_path() {
+    static const char s[] = "host0:/mc2_droptest.txt"; return s;
+}
+static int drop_frames() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','g'));
+    if (!v || v[0] < '1' || v[0] > '9') return 0;
+    int n = 0;
+    while (*v >= '0' && *v <= '9') n = n * 10 + (*v++ - '0');
+    return n < 10 ? 10 : n;
+}
+static void drop_load() {
+    State *s = st();
+    s->drop_state = 1u;
+    mc3_u32 bytes, mem;
+    const mc3_u32 text = read_whole(drop_path(), 0x100000u, &bytes, &mem);
+    if (!text) { mark('R','D','R','E', 0u, 1u); s->drop_state = 3u; return; }
+    mc3_u32 lines = 0;
+    for (mc3_u32 i = 0; i < bytes; ++i) if (((const char *)text)[i] == '\n') ++lines;
+    float *pts = (float *)r_alloc((lines + 1u) * 20u + 16u);
+    if (!pts) { r_free((void *)mem); mark('R','D','R','E', 0u, 2u); s->drop_state = 3u; return; }
+    s->drop_mem = (mc3_u32)pts;
+    s->drop_points = ((mc3_u32)pts + 15u) & ~15u;
+    float *out = (float *)s->drop_points;
+    const char *p = (const char *)text, *end = p + bytes;
+    s->drop_count = 0;
+    while (p < end && s->drop_count <= lines) {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
+        if (p >= end) break;
+        if (*p != '#') {
+            // x y z [vx vz]: parse_float stops at the end of the line, so
+            // missing values read 0
+            float *t = out + s->drop_count * 5u;
+            for (int k = 0; k < 5; ++k) t[k] = parse_float(&p);
+            ++s->drop_count;
+        }
+        while (p < end && *p != '\n') ++p;
+    }
+    r_free((void *)mem);
+    mark('R','D','R','L', s->drop_count, bytes);
+    s->drop_state = 2u;
+}
+static void drop_test(mc3_u32 camera, int frames) {
+    State *s = st();
+    if (!s->drop_state) {
+        if (!load_finished()) return;           // the whole city first
+        drop_load();
+    }
+    if (s->drop_state != 2u) return;
+    const mc3_u32 player = MC3_CALL1(mc3_u32, PLAYER_GET, int)(0);
+    if (!ptr(player) || !ptr(word(player + 20u))) return;
+    const mc3_u32 car = word(player + 20u);
+    if (!ptr(word(car + 0x18u))) return;
+    const mc3_u32 i = s->drop_frame / (mc3_u32)frames, f = s->drop_frame % (mc3_u32)frames;
+    if (i >= s->drop_count) {
+        mark('R','D','R','E', s->drop_count, 0u);
+        s->drop_state = 3u;
+        return;
+    }
+    ++s->drop_frame;
+    const float *t = (const float *)s->drop_points + i * 5u;
+    const float *mine = (const float *)(word(car + 0x18u) + 0x10u);
+    if (f == 0u) {
+        float m[12], vel[4];
+        for (int k = 0; k < 12; ++k) m[k] = ffrom(0u);
+        m[0] = m[4] = m[8] = ffrom(0x3F800000u);
+        m[9] = t[0]; m[10] = t[1] + ffrom(0x3FC00000u); m[11] = t[2];   // 1.5 m up
+        vel[0] = t[3]; vel[1] = ffrom(0u); vel[2] = t[4]; vel[3] = ffrom(0u);
+        s->drop_opp[9] = car;
+        s->drop_brain[3] = (mc3_u32)&s->drop_opp[0];
+        MC3_CALL3(void, AI_TELEPORT_CAR, mc3_u32, mc3_u32, mc3_u32)
+            ((mc3_u32)&s->drop_brain[0], (mc3_u32)m, (mc3_u32)vel);
+    } else if ((t[3] != ffrom(0u) || t[4] != ffrom(0u)) && f + 6u < (mc3_u32)frames) {
+        // wall test: keep pushing at the same speed (the car's own drag
+        // stops a single throw within 2-5 m); phInertialCS::SetVelocity on
+        // *(*(car+4)+104)+12, the body aiBrain::TeleportCar gives a velocity
+        const mc3_u32 sim = word(car + 4u);
+        const mc3_u32 inertial = ptr(sim) && ptr(word(sim + 104u)) ? word(word(sim + 104u) + 12u) : 0u;
+        if (ptr(inertial)) {
+            float vel[4];
+            vel[0] = t[3]; vel[1] = ffrom(0u); vel[2] = t[4]; vel[3] = ffrom(0u);
+            MC3_CALL2(void, INERTIAL_SET_VELOCITY, mc3_u32, mc3_u32)(inertial, (mc3_u32)vel);
+        }
+    } else if (f == (mc3_u32)frames - 1u) {
+        mark('R','D','R','P', i, (mc3_u32)(int)(mine[10] * ffrom(0x41800000u)));
+        mark('R','D','R','X', (mc3_u32)(int)mine[9], (mc3_u32)(int)mine[11]);
+    }
+    if (ptr(camera)) {
+        float eye[3], at[3];
+        at[0] = t[0]; at[1] = t[1]; at[2] = t[2];
+        eye[0] = t[0]; eye[1] = t[1] + ffrom(0x41A00000u); eye[2] = t[2] - ffrom(0x41A00000u);
+        look_at(camera, eye, at);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Player pins: marking problems while driving. USB keyboard (the snapshot
+// freecam reads, 0x6F8EC8; the game polls it), keys on the number row so
+// they do not clash with freecam:
+//     1  missing texture   (drawn as MC2's orange cone)
+//     2  missing collision (a stop sign)
+//     3  anything else     (a freeway barrel)
+//     Shift + 1/2/3: on the wall the car faces - 2.6 m ahead, 0.8 m up;
+//     without Shift: on the ground 4 m ahead
+//     Backspace: remove the last pin
+// Every change rewrites the city's pins file (host0:/mc2_pins.txt for LA,
+// host0:/mc2_pins_paris.txt for Paris; one pin per line: index,
+// category, ground|wall, pin xyz, car forward xz, car xyz) and the table in
+// State starts with "MC2PINS1", so a savestate holds them too. The pins are
+// drawn with the MC2 prop of their category. Marker RPIN <index|cat<<16|wall<<24> <count>.
+// ---------------------------------------------------------------------------
+static const char *pins_path() { return mc2_city_pins(active_city()); }
+static __attribute__((noinline)) const char *pins_head() {
+    static const char s[] = "# mc2 pins: index category(1 texture 2 collision 3 other) ground|wall pin_x pin_y pin_z forward_x forward_z car_x car_y car_z\n";
+    return s;
+}
+static __attribute__((noinline)) const char *word_wall() { static const char s[] = " wall"; return s; }
+static __attribute__((noinline)) const char *word_ground() { static const char s[] = " ground"; return s; }
+static const char *pin_prop(mc3_u32 category) {
+    return mc2_city_pin_prop(active_city(), category);
+}
+enum { KEY_1 = 0x1E, KEY_2 = 0x1F, KEY_3 = 0x20, KEY_BACKSPACE = 0x2A };
+// bit k-1 for keys 1..3, bit 3 backspace, bit 4 shift
+static mc3_u32 pin_keys_held() {
+    if (!*(volatile mc3_u8 *)0x0062314Eu || !*(volatile mc3_u8 *)0x00615A38u ||
+        !*(volatile mc3_u8 *)0x00615A39u)
+        return 0u;
+    const mc3_u32 count = word(0x006F8ED0u);
+    if (count > 64u) return 0u;
+    const volatile mc3_u16 *keys = (const volatile mc3_u16 *)0x006F8ED4u;
+    mc3_u32 held = (word(0x006F8ECCu) & 0x22u) ? 16u : 0u;
+    for (mc3_u32 i = 0; i < count; ++i) {
+        const mc3_u32 k = keys[i];
+        if (k == KEY_1) held |= 1u;
+        else if (k == KEY_2) held |= 2u;
+        else if (k == KEY_3) held |= 4u;
+        else if (k == KEY_BACKSPACE) held |= 8u;
+    }
+    return held;
+}
+static int put_text(char *out, int at, const char *t) { while (*t) out[at++] = *t++; return at; }
+static int put_int(char *out, int at, int v) {
+    if (v < 0) { out[at++] = '-'; v = -v; }
+    char tmp[12]; int n = 0;
+    do { tmp[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (n) out[at++] = tmp[--n];
+    return at;
+}
+static int put_fixed(char *out, int at, float f) {      // one decimal
+    int t = (int)(f * ffrom(0x41200000u) + (f < ffrom(0u) ? ffrom(0xBF000000u) : ffrom(0x3F000000u)));
+    if (t < 0) { out[at++] = '-'; t = -t; }
+    at = put_int(out, at, t / 10);
+    out[at++] = '.';
+    out[at++] = (char)('0' + t % 10);
+    return at;
+}
+static void pins_save() {
+    State *s = st();
+    const mc3_u32 h = MC3_CALL1(mc3_u32, STREAM_CREATE, const char *)(pins_path());
+    if (!h) { mark('R','P','I','E', 1u, s->pin_count); return; }
+    char line[160];
+    {
+        const char *head = pins_head();
+        int n = 0;
+        while (head[n]) ++n;
+        MC3_CALL3(int, STREAM_WRITE, mc3_u32, const void *, int)(h, head, n);
+    }
+    for (mc3_u32 i = 0; i < s->pin_count; ++i) {
+        const Pin *pn = &s->pins[i];
+        int n = put_int(line, 0, (int)i);
+        line[n++] = ' ';
+        n = put_int(line, n, (int)pn->category);
+        n = put_text(line, n, pn->wall ? word_wall() : word_ground());
+        const float v[8] = { pn->pos[0], pn->pos[1], pn->pos[2], pn->forward[0], pn->forward[2],
+                             pn->car[0], pn->car[1], pn->car[2] };
+        for (int k = 0; k < 8; ++k) { line[n++] = ' '; n = put_fixed(line, n, v[k]); }
+        line[n++] = '\n';
+        MC3_CALL3(int, STREAM_WRITE, mc3_u32, const void *, int)(h, line, n);
+    }
+    MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+    s->pin_saved = s->pin_count;
+}
+// The pins of earlier sessions: host0:/mc2_pins.txt as pins_save writes it.
+static void pins_load() {
+    State *s = st();
+    mc3_u32 bytes, mem;
+    const mc3_u32 text = read_whole(pins_path(), 0x40000u, &bytes, &mem);
+    s->pin_count = 0;
+    if (!text) return;
+    const char *p = (const char *)text, *end = p + bytes;
+    while (p < end && s->pin_count < MAX_PINS) {
+        while (p < end && (*p == ' ' || *p == '\r' || *p == '\n')) ++p;
+        if (p >= end) break;
+        if (*p != '#') {
+            Pin *pn = &s->pins[s->pin_count];
+            parse_float(&p);                                      // index
+            pn->category = (mc3_u32)(int)parse_float(&p);
+            while (*p == ' ') ++p;
+            pn->wall = *p == 'w';
+            while (p < end && *p != ' ' && *p != '\n') ++p;
+            float v[8];
+            for (int k = 0; k < 8; ++k) v[k] = parse_float(&p);
+            pn->pos[0] = v[0]; pn->pos[1] = v[1]; pn->pos[2] = v[2];
+            pn->forward[0] = v[3]; pn->forward[1] = ffrom(0u); pn->forward[2] = v[4];
+            pn->car[0] = v[5]; pn->car[1] = v[6]; pn->car[2] = v[7];
+            if (pn->category >= 1u && pn->category <= 3u) ++s->pin_count;
+        }
+        while (p < end && *p != '\n') ++p;
+    }
+    r_free((void *)mem);
+    mark('R','P','I','L', s->pin_count, bytes);
+}
+// the pin's matrix (MC2 row convention: right, up, forward, position)
+static void pin_matrix(mc3_u32 i) {
+    State *s = st();
+    const Pin *pn = &s->pins[i];
+    float *m = (float *)(s->pin_mats + i * 64u);
+    const float fx = pn->forward[0], fz = pn->forward[2];
+    m[0] = fz;         m[1] = ffrom(0u); m[2] = -fx;  m[3] = ffrom(0u);
+    m[4] = ffrom(0u);  m[5] = ffrom(0x3F800000u); m[6] = ffrom(0u); m[7] = ffrom(0u);
+    m[8] = fx;         m[9] = ffrom(0u); m[10] = fz;  m[11] = ffrom(0u);
+    m[12] = pn->pos[0]; m[13] = pn->pos[1]; m[14] = pn->pos[2]; m[15] = ffrom(0x3F800000u);
+}
+static void pins_update() {
+    State *s = st();
+    if (!s->pin_mats) {
+        mc3_u8 *mem = (mc3_u8 *)r_alloc(MAX_PINS * 64u + 16u);
+        if (!mem) return;
+        s->pin_mem = (mc3_u32)mem;
+        s->pin_mats = ((mc3_u32)mem + 15u) & ~15u;
+        s->pin_magic[0] = 'M'; s->pin_magic[1] = 'C'; s->pin_magic[2] = '2'; s->pin_magic[3] = 'P';
+        s->pin_magic[4] = 'I'; s->pin_magic[5] = 'N'; s->pin_magic[6] = 'S'; s->pin_magic[7] = '1';
+        pins_load();
+        for (mc3_u32 i = 0; i < s->pin_count; ++i) pin_matrix(i);
+    }
+    const mc3_u32 held = pin_keys_held();
+    const mc3_u32 pressed = held & ~s->pin_keys;
+    s->pin_keys = held;
+    if (pressed & 8u) {
+        if (s->pin_count) --s->pin_count;
+        pins_save();
+        mark('R','P','I','N', 0xFFFFFFFFu, s->pin_count);
+        return;
+    }
+    const mc3_u32 category = (pressed & 1u) ? 1u : (pressed & 2u) ? 2u : (pressed & 4u) ? 3u : 0u;
+    if (!category || s->pin_count >= MAX_PINS) return;
+    const mc3_u32 player = MC3_CALL1(mc3_u32, PLAYER_GET, int)(0);
+    if (!ptr(player) || !ptr(word(player + 20u)) || !ptr(word(word(player + 20u) + 0x18u))) return;
+    const float *car = (const float *)(word(word(player + 20u) + 0x18u) + 0x10u);
+    float fx = -car[6], fz = -car[8];                // the car drives along -back
+    const float fl = fsqrt(fx * fx + fz * fz);
+    if (fl < ffrom(0x3C23D70Au)) return;
+    fx /= fl; fz /= fl;
+    Pin *pn = &s->pins[s->pin_count];
+    pn->category = category;
+    pn->wall = (held & 16u) ? 1u : 0u;
+    const float ahead = pn->wall ? ffrom(0x40266666u) : ffrom(0x40800000u);   // 2.6 / 4 m
+    pn->pos[0] = car[9] + fx * ahead;
+    pn->pos[1] = car[10] + (pn->wall ? ffrom(0x3F4CCCCDu) : ffrom(0u));      // 0.8 m up
+    pn->pos[2] = car[11] + fz * ahead;
+    pn->forward[0] = fx; pn->forward[1] = ffrom(0u); pn->forward[2] = fz;
+    pn->car[0] = car[9]; pn->car[1] = car[10]; pn->car[2] = car[11];
+    pin_matrix(s->pin_count);
+    ++s->pin_count;
+    pins_save();
+    mark('R','P','I','N', (s->pin_count - 1u) | (category << 16) | (pn->wall << 24), s->pin_count);
+    {
+        const mc3_u32 type = find_prop_type(pin_prop(category));
+        const PropType *t = type == NO_IMAGE ? 0 : &s->prop_types[type];
+        mark('R','P','I','T', type, t ? (t->ok << 24) | (t->packets << 8) | (mc3_u32)(int)t->radius : 0u);
+    }
+}
+static void queue_pins(mc3_u32 arena) {
+    State *s = st();
+    if (!s->pin_mats || !s->props_ready) return;
+    for (mc3_u32 i = 0; i < s->pin_count; ++i) {
+        const Pin *pn = &s->pins[i];
+        const mc3_u32 type = find_prop_type(pin_prop(pn->category));
+        if (type == NO_IMAGE || !s->prop_types[type].ok) continue;
+        const PropType *t = &s->prop_types[type];
+        if (!sphere_visible(pn->pos[0], pn->pos[1], pn->pos[2], t->radius + ffrom(0x3F800000u))) continue;
+        mc3_u32 need = 0, last = NO_IMAGE;
+        for (mc3_u32 k = 0; k < t->packets; ++k) {
+            if (t->pk_slot[k] != last && !image_resident(t->pk_slot[k])) need += upload_bytes(t->pk_slot[k]);
+            last = t->pk_slot[k];
+        }
+        if (!arena_can_take(need)) { ++s->frame_skipped; continue; }
+        queue_ref(s->pin_mats + i * 64u, 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
+        for (mc3_u32 k = 0; k < t->packets; ++k) {
+            const mc3_u32 sw = use_image(t->pk_slot[k], arena);
+            if (sw) bind_switch(sw);
+            queue_ref(t->pk_addr[k], t->pk_qwc[k], 0u, 0u);
+        }
+    }
+}
+
+// aiOpponent::Update (0x4034A0) starts with a fell-out-of-the-world test: a car
+// lower than the aiRouter's min y - 10 skips the whole AI and its brain puts it
+// back on the path, every frame. The router (aiRailNetwork::sm_pinstance
+// 0x61B170, +88) is never loaded in game - its box stays 0 - so the floor is
+// y = -10, and LA has road below that: the PCH under the Santa Monica bluffs
+// is at y = -16. All opponents that took the California Incline stayed glued
+// to the shortcut node at (-826, -16, -1170) for the rest of the race. The
+// box's min y is set to MC2's own (losangeles.aib, aiRouter tag 0x4205: min
+// y -16.31), so the floor is -26.3 like in MC2. Marker RFLR <old> <new>.
+enum { RAIL_NETWORK = 0x0061B170 };
+static void fix_ai_floor() {
+    const mc3_u32 target = mc2_city_router_min_y(active_city());
+    const mc3_u32 rail = word(RAIL_NETWORK);
+    const mc3_u32 router = ptr(rail) ? word(rail + 88u) : 0u;
+    if (!target || !ptr(router) || word(router + 4u) == target) return;
+    mark('R','F','L','R', word(router + 4u), target);
+    *(volatile mc3_u32 *)(router + 4u) = target;
+}
+
+// Diagnostic: what MC3's occluder culling decided (mcGame::PreDraw 0x1A14B0 ->
+// rmcCarModel::CullUpdate 0x2F6278 stores IsAABoxOccluded == 0 at model+64 for
+// view 0) and from where: the viewer is the local player's camera matrix
+// (player+108 -> +8 -> +0x30 -> +0x40 or +0x10 by the byte at +0x7C), NOT the
+// camera this renderer is handed - so in the spectator modes the occlusion is
+// seen from the player's own car. Every 30 frames:
+//   ROCC <racer << 24 | visible flag> <car x << 16 | z (whole metres)>
+//   ROCV <viewer x> <viewer z> (floats), ROCY <viewer y> <racer count>
+enum { PLAYER_MANAGER = 0x0061B1E0 };
+static int spectate_seconds();
+static void occ_probe() {
+    const mc3_u32 mgr = word(PLAYER_MANAGER);
+    if (!ptr(mgr)) return;
+    const mc3_u32 n = word(mgr + 40u);
+    for (mc3_u32 i = 0; i < n && i < 8u; ++i) {
+        const mc3_u32 p = word(mgr + 8u + 4u * i);
+        if (!ptr(p)) continue;
+        const mc3_u32 car = word(p + 20u);
+        const mc3_u32 model = ptr(car) ? word(car + 8u) : 0u;
+        const mc3_u32 mat = ptr(car) ? word(car + 24u) : 0u;
+        if (!ptr(model) || !ptr(mat)) continue;
+        const float *m = (const float *)mat;
+        mark('R','O','C','C', (i << 24) | (word(model + 64u) & 0xFFFFFFu),
+             (((mc3_u32)(int)m[13] & 0xFFFFu) << 16) | ((mc3_u32)(int)m[15] & 0xFFFFu));
+    }
+    const mc3_u32 p0 = word(mgr + 8u);
+    const mc3_u32 cam = ptr(p0) ? word(p0 + 108u) : 0u;
+    const mc3_u32 a = ptr(cam) ? word(cam + 8u) : 0u;
+    const mc3_u32 v1 = ptr(a) ? word(a + 0x30u) : 0u;
+    if (!ptr(v1)) return;
+    const mc3_u32 view = *(volatile mc3_u8 *)(v1 + 0x7Cu) ? v1 + 0x40u : v1 + 0x10u;
+    mark('R','O','C','V', word(view + 36u), word(view + 44u));
+    mark('R','O','C','Y', word(view + 40u), n);
+}
+
+// The city is drawn here, into MC3's packet stream at this point of the frame.
+// Where MC3's light reflections may show. MC3 draws them (headlights, traffic,
+// city lights, sun/moon) into the city env map's target and pastes that with
+// ALPHA 0x58 = Cs * Ad + Cd (mcCityEnvMap::CopyReflectedObjectsToFrame): the
+// FRAME ALPHA is the reflectivity of each pixel. MC2 draws with alpha 0x80
+// everywhere, so every wall, prop and leaf was a perfect mirror. After the city
+// and the props: the whole frame's alpha is cleared to 0 (a sprite, alpha only,
+// no depth test or write), then the `_0_refl` ground is drawn again, alpha only,
+// with the palette whose alpha is road_alpha(), depth-tested (GEQUAL, no Z
+// write) so only the ground that is really visible reflects. Colours, blending
+// and depth are untouched - an earlier try that changed the blend and the
+// vertex alpha broke every cut-out texture (leaves, pylons, wires).
+// FRAME as rmcState::DoFlush builds it: FBP gfxPipeline::GetFBP(0) = *0x715C7C,
+// FBW *0x70E510 / 64, PSM by *0x70FAD8/*0x70FADC, FBMSK in the high word (MC3's
+// current one is *0x6BE618). [boot] mc2m = 0 turns the pass off.
+enum { GS_FBP = 0x00715C7C, GS_WIDTH = 0x0070E510, GS_FMT = 0x0070FAD8, GS_FMT2 = 0x0070FADC,
+       GS_FBMSK = 0x006BE618 };
+static int reflect_mask_enabled() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','m'));
+    return !v || v[0] != '0';
+}
+static void frame_reg(mc3_u32 *lo, mc3_u32 *hi, mc3_u32 fbmsk) {
+    const mc3_u32 fmt = word(GS_FMT);
+    const mc3_u32 psm = fmt == 16u ? (word(GS_FMT2) >= 17u ? 10u : 2u) : 0u;
+    *lo = word(GS_FBP) | ((word(GS_WIDTH) >> 6) << 16) | (psm << 24);
+    *hi = fbmsk;
+}
+// A+D list: FLUSH, DIRECT, one GIF tag, then n register writes (ad_put)
+static volatile mc3_u32 *ad_begin(mc3_u32 arena, mc3_u32 n) {
+    State *s = st();
+    const mc3_u32 bytes = 32u + n * 16u;
+    if (!arena_can_take(bytes)) return 0;
+    const mc3_u32 p = arena + s->arena_used;
+    volatile mc3_u32 *w = (volatile mc3_u32 *)(p | UNCACHED);
+    w[0] = 0u; w[1] = 0u; w[2] = VIF_FLUSH; w[3] = VIF_DIRECT | (n + 1u);
+    w[4] = 0x8000u | n; w[5] = 0x10000000u; w[6] = 0xEu; w[7] = 0u;
+    queue_ref(p, n + 2u, 0u, 0u);
+    s->arena_used += bytes;
+    return w + 8;
+}
+static void ad_put(volatile mc3_u32 *w, mc3_u32 k, mc3_u32 lo, mc3_u32 hi, mc3_u32 reg) {
+    w[4u * k] = lo; w[4u * k + 1u] = hi; w[4u * k + 2u] = reg; w[4u * k + 3u] = 0u;
+}
+// The `_0_refl` ground this frame drew (later[]), once more with whatever
+// palette and state are in effect.
+static void redraw_ground(mc3_u32 arena) {
+    State *s = st();
+    for (mc3_u32 k = 0; k < s->later_count; ++k) {
+        const mc3_u32 v = s->later[k];
+        if (v & 0x8000u) {
+            const mc3_u32 i = v & 0x7FFFu;
+            queue_ref(instance_matrix(s, i), 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
+            queue_pcp(s->inst_refl[i] - 1u, arena);
+        } else {
+            queue_ref(s->pieces[v].packet, 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
+            queue_pcp((s->target_word[v] & 0xFFFFu) - 1u, arena);
+        }
+    }
+}
+// One instance with its `_0_main` chain, or its pieces flat.
+static void draw_instance_plain(mc3_u32 i, mc3_u32 arena) {
+    State *s = st();
+    const ModelDraw *model = &s->models[instance_record(s, i)[0]];
+    for (mc3_u32 j = 0; j < model->count; ++j)
+        if (!s->pieces[model->pieces[j]].ready) return;
+    queue_ref(instance_matrix(s, i), 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
+    const mc3_u32 m = s->instance_word[i];
+    if ((m & 0xFFFFu) && queue_pcp((m & 0xFFFFu) - 1u, arena)) return;
+    for (mc3_u32 j = 0; j < model->count; ++j)
+        queue_piece(&s->pieces[model->pieces[j]], arena);
+}
+static void reflect_mask_pass(mc3_u32 arena) {
+    State *s = st();
+    if (!reflect_mask_enabled()) return;
+    const mc3_u32 ctx = *(volatile mc3_u8 *)GS_CONTEXT;
+    mc3_u32 flo, fhi;
+    frame_reg(&flo, &fhi, 0x00FFFFFFu);                      // write alpha only
+    volatile mc3_u32 *w = ad_begin(arena, 8u);
+    if (!w) return;
+    ad_put(w, 0, flo, fhi, 0x4Cu + ctx);                     // FRAME
+    ad_put(w, 1, word(GS_ZBUF_BASE), word(GS_ZBUF_BASE + 4u) | 1u, 0x4Eu + ctx);  // no Z write
+    ad_put(w, 2, 0x30000u, 0u, 0x47u + ctx);                 // TEST: Z always, no alpha test
+    ad_put(w, 3, 6u | (ctx << 9), 0u, 0x00u);                // PRIM sprite
+    ad_put(w, 4, 0u, 0x3F800000u, 0x01u);                    // RGBAQ, alpha 0
+    ad_put(w, 5, 0u, 0u, 0x05u);                             // XYZ2 top left
+    ad_put(w, 6, 0xFFFFFFFFu, 0u, 0x05u);                    // XYZ2 bottom right
+    ad_put(w, 7, 0x5100Fu, 0u, 0x47u + ctx);                 // TEST as the city (GEQUAL)
+    if (s->later_count) {
+        queue_vcl(s->palette_refl);
+        redraw_ground(arena);
+        // MC2's wetness: the same ground again with the texture's alpha (TCC=1)
+        // times wet_scale(), kept only where it beats the flat road_alpha
+        // (alpha test GREATER, failing pixels untouched). Rainy puddles then
+        // mirror, dry asphalt keeps the flat value.
+        const mc3_u32 wet = wet_scale();
+        if (wet && s->palette_wet) {
+            w = ad_begin(arena, 1u);
+            if (w) {
+                ad_put(w, 0, 0x5000Du | (road_alpha() << 4), 0u, 0x47u + ctx);
+                queue_vcl(s->palette_wet);
+                s->force_tcc = 1u; s->bound_switch = 0u;
+                redraw_ground(arena);
+                s->force_tcc = 0u; s->bound_switch = 0u;   // next switch re-sends TCC as stored
+                w = ad_begin(arena, 1u);
+                if (w) ad_put(w, 0, 0x5100Fu, 0u, 0x47u + ctx);
+            }
+        }
+        queue_vcl(s->palette);
+    }
+    // MC2's card reflections - glow cards standing under the ground below shop
+    // windows - drawn the way MC2 pastes its reflections (seen in the DMA list
+    // of an MC2 frame): colour added times the FRAME alpha (ALPHA 0x58 =
+    // Cs * Ad + Cd), depth test ALWAYS, no Z and no alpha write. So they show
+    // only through the reflective ground actually visible, never on walls.
+    if (s->card_count) {
+        frame_reg(&flo, &fhi, 0xFF000000u);                  // colour only
+        w = ad_begin(arena, 3u);
+        if (w) {
+            ad_put(w, 0, flo, fhi, 0x4Cu + ctx);
+            ad_put(w, 1, 0x3000Fu, 0u, 0x47u + ctx);         // alpha != 0, Z always
+            ad_put(w, 2, 0x58u, 0u, 0x42u + ctx);            // Cs * Ad + Cd
+            s->bound_switch = 0u;
+            for (mc3_u32 k = 0; k < s->card_count; ++k) draw_instance_plain(s->cards[k], arena);
+            w = ad_begin(arena, 2u);
+            if (w) {
+                ad_put(w, 0, 0x44u, 0u, 0x42u + ctx);        // the city's ALPHA again
+                ad_put(w, 1, 0x5100Fu, 0u, 0x47u + ctx);
+            }
+        }
+    }
+    frame_reg(&flo, &fhi, word(GS_FBMSK));                   // MC3's own mask again
+    w = ad_begin(arena, 1u);
+    if (w) ad_put(w, 0, flo, fhi, 0x4Cu + ctx);
+}
+
+static int is_refl_chain(mc3_u32 index) {
+    const State *s = st();
+    return s->refl_chain && index < MAX_CPVS_ENTRIES && (s->refl_chain[index >> 5] >> (index & 31u)) & 1u;
+}
+static void draw_city() {
+    State *s = st();
     const int draw_instances = s->instances_ready && instances_enabled();
     const int cpv = s->cpvs_state == 2u && s->map_ready && s->palette;
     const mc3_u32 *map_targets = s->target_word;
@@ -2445,6 +3936,13 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
     s->draw_radius = draw_radius();
     queue_vcl(s->bootstrap);
     if (cpv) queue_vcl(s->palette);
+    if (zwrite_enabled()) queue_zbuf(arena, 1);
+    // `_0_refl` chains (the reflective ground) are drawn as everything else and
+    // also recorded, for reflect_mask_pass. later[]: target, or instance | 0x8000.
+    s->later_count = 0;
+    s->card_count = 0;
+    const int split = cpv && s->palette_refl && s->later;
+    const int card_pass = split && reflect_mask_enabled() && cards_enabled();
     for (mc3_u32 i = 0; i < s->target_count; ++i) {
         Piece *piece = &s->pieces[i];
         if (!piece->ready || s->targets[i].flags != 0u) continue;
@@ -2452,6 +3950,8 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
         const mc3_u32 m = (use_cpvs & 1u) ? map_targets[i] : 0u;
         if ((m & CPVS_COVERED) && !(m & 0xFFFFu)) continue;  // another record draws it
         ++visible_count;
+        if (split && (m & 0xFFFFu) && is_refl_chain((m & 0xFFFFu) - 1u))
+            s->later[s->later_count++] = (mc3_u16)i;
         queue_ref(piece->packet, 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
         if (m & 0xFFFFu) {
             if (queue_pcp((m & 0xFFFFu) - 1u, arena)) continue;
@@ -2463,6 +3963,10 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
         const mc3_u32 *record = instance_record(s, i);
         const ModelDraw *model = &s->models[record[0]];
         if (!instance_visible(record)) continue;
+        if (card_pass && (s->card_model[record[0] >> 5] >> (record[0] & 31u)) & 1u) {
+            if (s->card_count < MAX_CARDS) s->cards[s->card_count++] = (mc3_u16)i;
+            continue;       // drawn by reflect_mask_pass, weighted by the mask
+        }
         int ready = 1;
         for (mc3_u32 j = 0; j < model->count; ++j)
             if (!s->pieces[model->pieces[j]].ready) ready = 0;
@@ -2471,8 +3975,20 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
         visible_count += model->count;
         queue_ref(instance_matrix(s, i), 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
         const mc3_u32 m = (use_cpvs & 2u) ? map_instances[i] : 0u;
-        if (m) {
-            if (queue_pcp(m - 1u, arena)) continue;
+        const mc3_u32 refl = (use_cpvs & 2u) && s->inst_refl ? s->inst_refl[i] : 0u;
+        if ((m & 0xFFFFu) || refl) {
+            if (!(m & 0xFFFFu) || queue_pcp((m & 0xFFFFu) - 1u, arena)) {
+                mc3_u32 flat = (m >> 16) & 15u;  // pieces no chain covers (cover_instances)
+                if (refl && split) s->later[s->later_count++] = (mc3_u16)(0x8000u | i);
+                if (refl && !queue_pcp(refl - 1u, arena)) {
+                    ++s->frame_pcp_failed;
+                    flat |= (m >> 20) & 15u;
+                }
+                for (mc3_u32 j = 0; j < model->count && j < 4u; ++j)
+                    if (flat & (1u << j))
+                        queue_piece(&s->pieces[model->pieces[j]], arena);
+                continue;
+            }
             ++s->frame_pcp_failed;
         }
         for (mc3_u32 j = 0; j < model->count; ++j)
@@ -2494,6 +4010,9 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
         if (!sphere_visible(rec[0], rec[1], rec[2], rec[3])) continue;
         queue_prop(i, arena, d2 > prop_lod2);
     }
+    queue_pins(arena);
+    if (split) reflect_mask_pass(arena);
+    if (zwrite_enabled()) queue_zbuf(arena, *(volatile mc3_u8 *)GS_ZWRITE_FLAG != 0u);
     ++s->queued;
     if (s->queued == 1u || !(s->queued % 120u)) {
         mark('R','D','A','D', s->queued,
@@ -2506,11 +4025,188 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
         mark('R','H','M','N', s->heap_min, mc3_heap_free(mc3_heap_active()));
         mark('R','D','S','K', s->frame_skipped, s->arena_used);
         mark('R','D','P','R', s->frame_props, s->prop_count);
+        float *cp, *cv;
+        if (player_motion(&cp, &cv)) mark('R','C','A','R', fbits(cp[0]), fbits(cp[2]));
         if (ptr(s->camera))
             mark('R','C','A','M', word(s->camera + 36u), word(s->camera + 44u));
     }
 }
+
+// WHERE in the frame the MC2 city is drawn. mcCity::ModelDraw sets the camera
+// (0x257AEC, set_camera_hook) and only then runs mcCullableMgr::Render
+// (0x257BAC), whose passes go 1, 2, 4, 8 ... 2048. Pass 4 renders the
+// "reflected objects" and the light reflections on the wet road
+// (mcGlow::drawAllBufferedReflections) into the city env map's target and
+// pastes that into the frame (mcCityEnvMap::CopyReflectedObjectsToFrame, called
+// at 0x24AB80); pass 8 ends with mcCityEnvMap::DrawSky (the whole screen),
+// RenderLightGlows and DebugDraw (0x24ABC0); the city's own opaque passes come
+// after and cover all of it, so a reflection shows only where MC3's road lets
+// it through. Drawn at SetCamera, the MC2 city was UNDER the paste: every
+// reflection - headlights, traffic, sun/moon - showed through its walls, and on
+// its road at full strength. So the draw waits for the end of that block
+// (envmap_done_hook; drawing right after the paste lost the city under the
+// sky) when the city has an env map (mcCity+464) and pass 4 is on; otherwise,
+// or with [boot] mc2e = 0, it stays at SetCamera. If a frame never reached that point, drawing falls back to
+// SetCamera for good (marker RDEF 0 <frame>); RDEF 1 = deferring.
+enum { ENVMAP_DEBUG_DRAW_CALL = 0x0024ABC0, ENVMAP_DEBUG_DRAW = 0x00563990, CITY_PTR = 0x00615B40,
+       CULL_PASS_MASK = 0x00615B0C };
+static int defer_city_draw() {
+    State *s = st();
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','e'));
+    if (!v || v[0] != '1' || s->no_defer) return 0;     // off by default: see above
+    const mc3_u32 city = word(CITY_PTR);
+    return ptr(city) && ptr(word(city + 464u)) && (*(volatile mc3_u16 *)CULL_PASS_MASK & 4u);
+}
+// Drawn here, in the middle of mcCullableMgr::Render, the city's own VU1
+// program and constants (bootstrap) overwrite what MC3 already uploaded for the
+// rest of the frame - light matrices, state - and its cars came out black on an
+// orange road. MC3 recovers from its own passes with this exact sequence
+// (mcCullableMgr::Render after each pass): mark every cached state dirty, flush
+// it, re-send the light matrices.
+enum { RMC_DIRTY = 0x002A4F40, RMC_DO_FLUSH = 0x002AD228, RMC_UPDATE_LIGHTS = 0x002ADC78,
+       RMC_FLAGS = 0x7000010C, RMC_PENDING = 0x7000012C, RMC_CURRENT = 0x70000120,
+       RMC_DEFAULT = 0x70000110, RMC_LIGHTS_ON = 0x70000130, RMC_LIGHTS = 0x70000064,
+       RMC_SCRATCH = 0x70000000 };
+static void restore_mc3_state() {
+    ((void (*)(void))RMC_DIRTY)();
+    volatile mc3_u32 *pending = (volatile mc3_u32 *)RMC_PENDING;
+    if (word(RMC_FLAGS) || *pending >= 2u) {
+        MC3_CALL1(void, RMC_DO_FLUSH, mc3_u32)(RMC_SCRATCH);
+    } else if (*pending == 1u) {
+        *pending = 0u;
+        const mc3_u32 obj = word(RMC_DEFAULT);
+        *(volatile mc3_u32 *)RMC_CURRENT = obj;
+        MC3_CALL2(void, word(word(obj) + 44u), mc3_u32, mc3_u32)(obj, 0u);
+    }
+    if (*(volatile mc3_u8 *)RMC_LIGHTS_ON && word(RMC_LIGHTS))
+        MC3_CALL1(void, RMC_UPDATE_LIGHTS, mc3_u32)(RMC_SCRATCH);
+}
+extern "C" void envmap_done_hook(mc3_u32 env) {
+    MC3_CALL1(void, ENVMAP_DEBUG_DRAW, mc3_u32)(env);
+    State *s = st();
+    if (!s || !s->draw_pending) return;
+    s->draw_pending = 0u;
+    if (!s->defer_marked) { s->defer_marked = 1u; mark('R','D','E','F', 1u, s->queued); }
+    draw_city();
+    restore_mc3_state();
+}
+MC3_HOOK(ENVMAP_DEBUG_DRAW_CALL, envmap_done_hook);
+
+extern "C" void set_camera_hook(mc3_u32 camera) {
+    const int city = in_mc2_city() && state_acquire();
+    if (city && spectate_seconds() && !(st()->queued % 30u)) occ_probe();   // diagnostic, spectator runs only
+    {
+        int x, y, z;
+        if (ptr(camera) && boot_int(MC3_ID('m','c','2','x'), &x) &&
+            boot_int(MC3_ID('m','c','2','y'), &y) && boot_int(MC3_ID('m','c','2','z'), &z)) {
+            float *pos = (float *)(camera + 36u);
+            pos[0] = (float)x; pos[1] = (float)y; pos[2] = (float)z;
+            int down;
+            if (boot_int(MC3_ID('m','c','2','d'), &down) && down) {
+                // look straight down: right +X, up -Z, back +Y
+                float *m = (float *)camera;
+                m[0] = 1.0f; m[1] = 0.0f; m[2] = 0.0f;
+                m[3] = 0.0f; m[4] = 0.0f; m[5] = -1.0f;
+                m[6] = 0.0f; m[7] = 1.0f; m[8] = 0.0f;
+            }
+        }
+    }
+    {
+        const int seconds = spectate_seconds();
+        if (seconds && city) spectate(camera, seconds);
+        const int tour = tour_seconds();
+        if (tour && city) camera_tour(camera, tour);
+        const int drop = drop_frames();
+        if (drop && city) drop_test(camera, drop);
+        if (city && st()->props_ready) pins_update();
+    }
+    MC3_CALL1(void, SET_CAMERA, mc3_u32)(camera);
+    Tracked *t = trk();
+    if (!city) {
+        // front end, garage or another city: nothing of ours may stay resident
+        if (t->active || st()) { release_all(); t->active = 0u; }
+        return;
+    }
+    t->active = 1u;
+    fix_ai_floor();
+    State *s = st();
+    s->camera = camera;
+    if (s->draw_pending) {                 // last frame never reached the paste
+        s->draw_pending = 0u;
+        s->no_defer = 1u;
+        mark('R','D','E','F', 0u, s->queued);
+    }
+    // out of memory is not final: try again every RETRY_FRAMES
+    if ((s->texture_error == 5u || s->texture_error == 3u) && ++t->retry >= RETRY_FRAMES) {
+        t->retry = 0u;
+        s->texture_error = 0u;
+    }
+    if (!load_step()) { /* still loading */ }
+    if (s->props_ready && props_enabled()) step_prop_physics();
+    if (!s->manifest_ready || !s->bootstrap || !s->textures_ready ||
+        !s->frame_ready || !update_view_projection()) return;
+    {   // [boot] mc2o = 0 (diagnostic): the MC2 city is not drawn at all
+        const char *v = mc3_bootarg(MC3_ID('m','c','2','o'));
+        if (v && v[0] == '0') return;
+    }
+    if (defer_city_draw()) { s->draw_pending = 1u; return; }
+    draw_city();
+}
+
 MC3_HOOK(SET_CAMERA_HOOK, set_camera_hook);
+
+// Leaving a race for the front end (mcGameState::ChangeState(7) -> jal
+// EnterStateMC3Frontend at 0x1A5660). Two things have to happen right here,
+// before the front end loads its background city:
+//  - our heap goes back (release_all): no SetCamera runs between the race and
+//    that load, and San Diego alone asks for 8.9 MB;
+//  - the background city: the game reloads the LAST race's city and aims the
+//    menu camera at its entry in tune/ui/<lang>/menucamera.ui, which only has
+//    sd/atlanta/detroit/tokyo - for an added city the menus render off screen.
+//    Current and next race configs go back to San Diego, as after a race
+//    there; the arcade's own selection (0x619B18) keeps the player's city.
+// Marker: RFEN <city found> <blocks released>
+extern "C" mc3_u32 frontend_hook(mc3_u32 game_state) {
+    Tracked *t = trk();
+    const mc3_u32 blocks = t->n;
+    if (t->active || st()) { release_all(); t->active = 0u; }
+    const mc3_u32 cfgs[2] = { *(volatile mc3_u32 *)RACE_CONFIG_CURRENT,
+                              *(volatile mc3_u32 *)RACE_CONFIG_NEXT };
+    mc3_u32 found = 0xFFFFFFFFu;
+    for (int i = 0; i < 2; ++i) {
+        if (!ptr(cfgs[i])) continue;
+        volatile mc3_u32 *city = (volatile mc3_u32 *)cfgs[i];
+        if (i == 0) found = *city;
+        if (*city >= (mc3_u32)FIRST_CITY_WITHOUT_MENU_CAMERA && *city < 16u)
+            *city = (mc3_u32)FRONTEND_CITY;
+    }
+    mark('R','F','E','N', found, blocks);
+    return MC3_CALL1(mc3_u32, ENTER_FRONTEND, mc3_u32)(game_state);
+}
+MC3_HOOK(FRONTEND_CALL, frontend_hook);
+
+// The whole city load, before the race starts. mcGameState::EnterStateGame
+// (0x1A5700) ends with jal StartRace (0x1A58F0 -> 0x1A3E70); by then the city,
+// its layer and the cars are loaded, and the loading screen - drawn by
+// mcLoadingThread, not by this thread - is still up. Loading here instead of a
+// slice per frame means the race no longer starts with the map still coming
+// in (it took ~20 s). Needs `= shim` in the .ini, so the hook is in place for
+// the first race too. Marker RPLD <slices> <finished>.
+enum { START_RACE_CALL = 0x001A58F0, START_RACE = 0x001A3E70, PRELOAD_MAX_SLICES = 200000 };
+static void preload_city() {
+    if (!in_mc2_city() || !state_acquire()) return;
+    Tracked *t = trk();
+    t->active = 1u;
+    mc3_u32 n = 0;
+    int done = 0;
+    while (!done && n < PRELOAD_MAX_SLICES) { done = load_step(); ++n; }
+    mark('R','P','L','D', n, (mc3_u32)done);
+}
+extern "C" mc3_u32 start_race_hook(mc3_u32 game) {
+    preload_city();
+    return MC3_CALL1(mc3_u32, START_RACE, mc3_u32)(game);
+}
+MC3_HOOK(START_RACE_CALL, start_race_hook);
 
 extern "C" void mod_main() __attribute__((section(".text.start")));
 extern "C" void mod_main() { }

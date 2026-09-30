@@ -45,9 +45,14 @@ def main():
     d = bytearray(open(a.pck, 'rb').read())
     for base in SECTOR_PAL:
         off = 0x80 + base
+        # Alpha as retail: 0 in entries 0..7, 1.0 in 8..255, and 255 opaque
+        # white (the one rmcCpvPalette::Lookup reserves). Whoever draws with the
+        # city palette still resident - the checkpoint smoke column - uses that
+        # alpha; with 0 it vanishes. See PALETTE_ZERO_ALPHA in mc3_city_build.
         for k, (r, g, b) in enumerate(colours):
-            struct.pack_into('<4f', d, off + 16 * k,
-                             r / 128.0, g / 128.0, b / 128.0, 0.0)
+            rgb = (1.0, 1.0, 1.0) if k == 255 else (r / 128.0, g / 128.0, b / 128.0)
+            struct.pack_into('<4f', d, off + 16 * k, *rgb,
+                             0.0 if k < 8 else 1.0)
     out_path = a.out_path or a.pck
     open(out_path, 'wb').write(bytes(d))
     lum = [0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] for c in colours]

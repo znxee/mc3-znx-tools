@@ -23,7 +23,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (BaseDocTemplate, Frame, KeepTogether, PageBreak,
                                 PageTemplate, Paragraph, Spacer, Table, TableStyle)
 
-VERSION = "3.7"
+VERSION = "4.7"
 TITLE = "Midnight Club 3 - File Format Documentation"
 SUBTITLE = "PS2 .pck / PSP .psppck / Xbox .xbck, and the executable"
 
@@ -1043,6 +1043,12 @@ CONTENT = [
        "are bit0 = x, bit1 = z (222 of 222 tokyo references in the right cell). LA: 20379 "
        "polygons, 45726 references, 617 blocks; 1.08 MB against 1.65 MB for the converted "
        "<font face=Courier>losangeles_bnd.pck</font>, which is no longer installed."),
+ ("p", "The same runtime builder now selects MC2 data by MC3 city index. Paris is city 6: "
+       "its type 0x0B grid is 7 x 7 and builds 26,858 vertices, 18,299 polygons, "
+       "33,822 references and 237 type-9 blocks at depth 7. Its type 0x0A quad has "
+       "340 vertices and 412 polygons (775 references, 16 blocks). The returned body is "
+       "0xF5DC0 bytes. A physical sample of 451 points spread over the Paris grid produced "
+       "451 expected rests and zero falls, respawns or false high surfaces."),
 
  ("h3", "The traffic network (_city.aib)"),
  ("p", "<font face=Courier>ASSETS/city/&lt;city&gt;/&lt;city&gt;_city.aib</font> is a TaggedStream: "
@@ -1053,6 +1059,98 @@ CONTENT = [
        "<font face=Courier>losangeles.aib</font> uses 0x4107 and 0x410A and no 0x410C, and "
        "loads unchanged as <font face=Courier>losangeles_city.aib</font> (the one it replaced "
        "was tokyo's, byte for byte)."),
+ ("h3", "MC2 CPVS: an instance's chain is not its whole model"),
+ ("p", "In MC2's <font face=Courier>&lt;time&gt;_cpvs.rsc</font> each placed instance has one "
+       "<font face=Courier>..._&lt;type&gt;&lt;extension&gt;_0_main</font> PCP0 - the DMA chain that "
+       "draws it with per-vertex colour by <font face=Courier>ref</font>-ing into the PMD0s of the "
+       "model. In 100 of LA's instanced types (1265 of 7045 instances) that chain references only "
+       "the model's first near PMD0; the others have no PCP0 at all and are drawn straight from the "
+       "PMD0, flat. They are the model's ground: freeway and road decks, warehouse yards, office "
+       "parking. A renderer that draws the PCP0 instead of the model loses them - the background "
+       "shows through. Draw every near PMD0 the PCP0 does not reference after it."),
+ ("p", "Paris uses the same scheme with <font face=Courier>_p_inst_</font> rather than LA's "
+       "<font face=Courier>_l_inst_</font> token. Its original resource contains 1,493 PMD0 and "
+       "699 CMI0 records (270 components plus 429 types), 8,195 placements and 11,921 PCP "
+       "references. The final dawn/clear runtime resolved 178 component chains and 7,460 "
+       "instance chains; 4,460 of those instances needed one or more uncovered PMD0 pieces."),
+ ("p", "The same file names a second LOD 0 chain per model, <font face=Courier>_0_refl</font>. "
+       "It is not a reflection pass over the same geometry: it colours the model's OTHER near pieces - "
+       "road deck, sidewalks, gutters - that no <font face=Courier>_main</font> references (LA 309 "
+       "pieces, Paris 343; same format and VU program). Without it that ground is drawn flat, a bright "
+       "seam against the lit asphalt beside it."),
+ ("h3", "Occluders: why a car's lights show through a wall"),
+ ("p", "MC3 hides a car behind a building by testing it against box occluders from "
+       "<font face=Courier>ASSETS/city/&lt;city&gt;/&lt;city&gt;.occlude</font> (text, format 3: per box 8 "
+       "vertices from y -100 to the roof, 12 edges, 6 faces; atlanta 340, detroit 455). The local player "
+       "goes through rmcCarModel::CullUpdate (0x2F6278, IsAABoxOccluded 0x39B890, result at model+64); "
+       "opponents, traffic and props through mcOccluderSystem::DualFrustumVisCheck. A culled car loses its "
+       "body, its glows, its light reflections on the road and the light it throws on walls. Without "
+       "boxes that fit the city, only the body is hidden (by the Z buffer) and the lights show through "
+       "the building. The viewer and the cull frustum are the LOCAL PLAYER's camera (mcGame::PreDraw), "
+       "so a debug camera placed elsewhere sees cars vanish whenever they leave the player's frustum."),
+ ("p", "MC2's own .occlude holds a few tunnel quads, so the boxes of an MC2 city are generated "
+       "(mc2_occluders.py) from MC2's collision and drawn geometry: a flood fill from the aib's lanes over "
+       "floor, bounded by collision walls, leaves the building interiors; drawn facades and roofs give the "
+       "heights; the void behind a facade counts as that building; no box may touch a lane."),
+ ("h3", "A MC2 .aib in MC3: traffic controls and rail flags"),
+ ("p", "MC3's aiRailNetwork loader reads MC2's <font face=Courier>&lt;city&gt;.aib</font> tag by tag, but "
+       "two records differ. A traffic control (tag 0x4105) is, in MC3, u16 count + ids + two floats "
+       "(10.0, 2.5); MC2 stops after the ids. The reader takes the floats anyway, and "
+       "TaggedStream::ReadTag (0x5B86F8) ends the whole stream when a reader went past its record - so "
+       "nothing after the first control loaded, including the aiRouter (0x4106: box, 50 m cells, cell to "
+       "road lists). And bit 1 of a rail's flags (+18 of the 20-byte 0x4109 record) means 'no traffic "
+       "here' to MC3 (set only with bit 5 in retail) but is on most MC2 rails. MC2 also stores "
+       "pedestrian paths in the same AIB and marks them with bit 3. Result without adaptation: "
+       "zero ambient traffic; clearing bit 1 indiscriminately puts cars on sidewalks. The "
+       "mc2_aib_compat shim reads short controls, clears bit 1 only on car rails, and gives every "
+       "bit-3 pedestrian rail the native MC3 closed pair (bits 1+5). Paris measured 2,113 car rails "
+       "opened and all 1,305 pedestrian rails closed out of 3,805. A live scan of every active "
+       "ambient car found zero on pedestrian rails; a cubic-Hermite rail-versus-collision scan found "
+       "zero car-rail centers inside sidewalk polygons. Both systems still use the same original AIB; "
+       "the runtime flag mapping separates their rail subsets."),
+ ("h3", "HUD map of an added city"),
+ ("p", "The minimap image comes from the streamed build <font face=Courier>resources/city/hudmap</font>: "
+       "a table of rmcTexturePS2 pointers indexed by city (+3 for the locked variant) - 0 sd, 1 atlanta, "
+       "2 detroit, 3 tokyo, 4 atlanta_locked, 5 detroit_locked, then per-race maps. The world-to-map "
+       "scale comes from hudMap::SharedDataAllTypes at 0x6BDE20, 32 bytes per city "
+       "(min x, max x, span, 1/span, then the same for z), filled by sub_285438 for cities 0..3 only; "
+       "its readers index it through sub_285508(table, city). A city 5 therefore draws detroit_locked "
+       "with garbage extents. mcTextureFactory::Create(name) (vtable +12 of *0x618954) makes an "
+       "rmcTexturePS2 that loads a loose <font face=Courier>ASSETS/texture/&lt;name&gt;.tex</font> "
+       "(+ _proxy), and sub_285540(entry, city) fills an entry from mcCity::GetCityExtendsForMap."),
+ ("p", "For Paris the loose image is MC2's original 65,614-byte "
+       "<font face=Courier>hud_map_paris.tex</font>. The synthetic MC3 shell carries only one "
+       "empty-cookie hood per source hood and a harmless cube, but keeps Paris's measured map "
+       "extents: x -1880..1520 and z -1640..1360. The city geometry itself remains in the "
+       "original MC2 files and is drawn by the runtime renderer."),
+ ("h3", "Registering a seventh city"),
+  ("p", "The visible Arcade cycle is not the only city-count limit. "
+       "<font face=Courier>mc::LoadCityData</font> at 0x4B79D8 contains "
+       "<font face=Courier>slti v0,s3,6</font>; changing the Arcade modulo alone leaves city 6 "
+       "with no races. The Paris slot patch changes that guarded instruction to a limit of 7 "
+        "and flushes the instruction cache. With a valid <font face=Courier>paris.loc</font>, the "
+        "runtime reported 24 entries: one standard Cruise plus 23 converted MC2 races."),
+  ("p", "The converter also removes MC2's nested <font face=Courier>PreRacePath</font> "
+        "from Opponent blocks. MC3 does not consume that grammar; it loses token alignment "
+        "and supplies a null CarType to the following aiOpponentFactory. This was isolated "
+        "from the only two Paris races that stopped at loading. After the removal, all 22 "
+        "Paris races with opponents reached the city with their declared opponent counts."),
+ ("h3", "The AI floor (aiRouter box)"),
+ ("p", "aiOpponent::Update (0x4034A0) starts with a fell-out-of-the-world test: when the "
+       "car's y is below the aiRouter box's min y - 10 it calls the brain (vtable +64, puts "
+       "the car back on its path) and skips the rest of the AI, every frame. The router is "
+       "<font face=Courier>*(aiRailNetwork::sm_pinstance 0x61B170 + 88)</font>, box min at "
+       "+0 and max at +12. Retail AIBs load it, and MC2 AIBs load it after the short-control "
+       "shim above; the earlier claim that it was never loaded was wrong. A city-specific "
+       "floor is still required for roads below the router margin: in LA, "
+       "the PCH under the Santa Monica bluffs (y -16) held all eight cars at "
+       "(-826, -16, -1170). Los Angeles sets min y to MC2's own value (-16.31, router tag "
+       "0x4205 of losangeles.aib), which puts the floor at -26.3. Paris uses its own router "
+       "minimum -17.301518, producing a threshold of -27.3."),
+ ("note", "Not the distance to the player: with the player's car kept 30 m above the "
+          "watched opponent every frame (moved with aiBrain::TeleportCar 0x3FC600, which only "
+          "reads brain+12 -> opponent and opponent+36 -> car) the cars stacked the same, and "
+          "aiStuck (opponent+116: state +8, count +20, really-stuck +92) stayed 0."),
 ]),
 
 ("Vector unit microcode", [
@@ -1092,6 +1190,29 @@ CONTENT = [
        "768..1023. So the city has <b>no angle-dependent lighting</b>; it is baked per "
        "vertex. The index is not reconstructible - its correlation with the normal is "
        "+0.045/-0.001/+0.059 and with height +0.051."),
+ ("h3", "MC2 ground textures: the alpha is wetness"),
+ ("p", "In MC2's shared texture banks (<font face=Courier>textures_&lt;time&gt;_&lt;weather&gt;.rsc</font>) the "
+       "ground textures' CLUT alpha is not opacity but how wet each texel is, per weather. LA, max / mean: "
+       "clear asphalt 0 / 0, cloudy 29 / 7, rainy 104 / 25, rainy sidewalks 128 / 30. MC2 pastes its "
+       "reflections into the frame with ALPHA 0x58 (Cs * Ad + Cd) and 0x54 ((Cs - Cd) * Ad + Cd), alpha "
+       "write masked and depth test ALWAYS (read from the DMA list of an MC2 frame), so the frame alpha "
+       "the ground leaves is the reflectivity, exactly as in MC3."),
+ ("p", "The <font face=Courier>*cardblk*</font> instance models (68 in LA, 37 in Paris, texture "
+       "<font face=Courier>fx_reflection_01</font>) are vertical glow cards 1.4 to 20 m below the ground "
+       "under shop windows: the windows mirrored, meant to be seen only through that alpha."),
+ ("h3", "The palette alpha is used by whoever draws next"),
+ ("p", "The two palettes are inline in the MapRoot (file offsets 0x310 and 0x1310): +0x30 is "
+       "the source and +0x2C the live copy that <font face=Courier>mcCity::ChangePaletteSaturation</font> "
+       "(0x257770) rebuilds through HSV with the condition's multipliers. Every retail city, in "
+       "every condition, has <b>alpha 0 in entries 0..7, alpha 1.0 in 8..255, and entry 255 "
+       "opaque white</b> - the one <font face=Courier>rmcCpvPalette::Lookup</font> tests first."),
+ ("p", "The alpha matters outside the city geometry. <font face=Courier>mcCityModelClass::SetRenderStates</font> "
+       "downloads the live palette to VU1 and it stays resident; <font face=Courier>mcCheckpoint::Draw</font> "
+       "(0x3CB738) then calls <font face=Courier>rmcSetCpvMode(1, 0)</font> without a palette of its own. "
+       "The <font face=Courier>cp_flare*</font> shaders are modulate + blendset normal, so the checkpoint "
+       "smoke column takes its alpha from the city palette. A synthetic city with alpha 0 in all 256 "
+       "entries draws the column fully transparent - measured, and fixed by giving the palette the "
+       "retail alpha."),
  ("h3", "Walking the stream without desyncing"),
  ("p", "Three things must be right. UNPACK data pads to <b>four</b> bytes, not sixteen. "
        "STMASK carries 4 bytes of its own and STROW/STCOL carry 16. And a <b>masked</b> "
@@ -1658,7 +1779,7 @@ CONTENT = [
     ["+0x10", "another shader array", "same"],
     ["+0x14 / +0x18", "hood table, 20 bytes per entry", "mcHood::mcHood"],
     ["+0x1C", "flat index: every component and instance", "0x25B9D8"],
-    ["+0x2C / +0x30", "two 256-entry RGB palettes", "relocated only"],
+    ["+0x2C / +0x30", "two 256-entry RGBA palettes (live / source)", "ChangePaletteSaturation"],
     ["+0x190 / +0x194 / +0x198", "cullable classes (city model, instance)", "mcCityModelClass etc."],
     ["+0x228", "texture proxy", "rmcTextureProxyPS2"],
     ["+0x268", "sizes the two scratch arrays of +0x1C", "read, not walked"],
