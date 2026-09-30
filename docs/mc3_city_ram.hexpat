@@ -1133,7 +1133,7 @@ struct Shader {
     //
     // WHAT THOSE TWO FIELDS ARE, I DO NOT KNOW. Sweeping the 33 animations in
     // the retail .pck files (18 in atlanta, 9 in detroit, 6 in sd, none in tokyo
-    // nor in modcity) they show up in three forms:
+    // nor in losangeles) they show up in three forms:
     //
     //     two pointers, almost always 0x10 or 0x30 apart          ~15 cases
     //     a pair (1, N) with N in {4, 6, 8, 9, 0x10, 0x1A, 0x1E}  ~15 cases

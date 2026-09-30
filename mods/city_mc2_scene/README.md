@@ -1,6 +1,6 @@
 # MC2 Los Angeles scene in MC3 (experimental)
 
-`city_mc2_scene.mod` renders MC2 Los Angeles geometry above the empty ModCity
+`city_mc2_scene.mod` renders MC2 Los Angeles geometry above the empty Los Angeles
 kit. This is a *visual scene*, not a playable city conversion: collision,
 roads, traffic, props, gameplay zones and minimap are not imported. The
 freecam can inspect the scene in native MC2 world coordinates. Real PS2
@@ -45,7 +45,7 @@ python "mods/city_mc2_scene/patch_clip_template.py" "$MC3_HOSTFS/mc2t_*.vcl"
 HostFS tiles and their source copy
 `Y:/Atomic Chat/modderG_iso_work/cpv_native_depth_20260924/all_tiles/` (the
 CPVS generation actually staged; `mc2_all_tiles/` is the older pre-CPVS set)
-are patched and identical. Before/after captures at the ModCity spawn:
+are patched and identical. Before/after captures at the Los Angeles spawn:
 `Y:/temp/clip_fan_20260925/` (`compare_t075_topleft.png`); PRIM count and the
 seven baseline TLB misses are unchanged.
 
@@ -70,7 +70,7 @@ cause a brief visual pop. Missing grid cells are sparse/outside the hood and
 return an open error if visited. Do not enable this together with another mod
 owning the same SetCamera hook (notably `city_mc2_queue.mod`).
 
-For a temporary HostFS test, install the empty ModCity kit and set
+For a temporary HostFS test, install the empty Los Angeles kit and set
 `city_mc2_scene.mod = shim` under `[mods]` in `$MC3_HOSTFS/mc3boot.ini`.
 `freecam.mod = defer` is useful to inspect the scene. `[boot] mc2l = 0`
 submits all visible pieces; a positive value limits the count. Restore the

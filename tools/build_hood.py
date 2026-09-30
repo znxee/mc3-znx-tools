@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Build modcity with a subset of LA's neighbourhoods, reproducing the v9 recipe
+"""Build losangeles with a subset of LA's neighbourhoods, reproducing the v9 recipe
 (local components + fixed chain), and install it into the 9 variants.
 
 Usage:
@@ -24,7 +24,7 @@ ID_MAP = os.path.join(ROOT, 'output', 'shader_texture_route_20260905',
                        'native_texture_map.tsv')
 TEX_MAP = os.path.join(ROOT, 'output', 'la_textures_per_model.json')
 MANIF_PPF = os.path.join(ROOT, 'output', 'shader_texture_route_20260905',
-                         'candidate', 'modcity_midnight_clear.manifest.json')
+                         'candidate', 'losangeles_midnight_clear.manifest.json')
 DONOR = os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'ASSETS/resources/city/atlanta_midnight_clear.pck')
 DEST = os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'ASSETS/resources/city')
 VARIANTS = ['dawn_clear', 'dawn_cloudy', 'dawn_rainy',
@@ -69,7 +69,7 @@ def main():
     hoods = [h.strip() for h in a.hoods.split(',') if h.strip()]
     label = '_'.join(h.replace('l_', '') for h in hoods)
     place_tmp = os.path.join(ROOT, 'output', 'hood_test_%s_place.tsv' % label)
-    out_path = os.path.join(ROOT, 'output', 'modcity_hood_%s.pck' % label)
+    out_path = os.path.join(ROOT, 'output', 'losangeles_hood_%s.pck' % label)
 
     counter_ = filter_place(hoods, place_tmp)
     if not counter_:
@@ -93,12 +93,12 @@ def main():
         print('--assemble-only: not installed.')
         return
     for v in VARIANTS:
-        dst = os.path.join(DEST, 'modcity_%s.pck' % v)
+        dst = os.path.join(DEST, 'losangeles_%s.pck' % v)
         shutil.copyfile(out_path, dst)
     # verify
     target = sha(out_path)
     ok = sum(1 for v in VARIANTS
-             if sha(os.path.join(DEST, 'modcity_%s.pck' % v)) == target)
+             if sha(os.path.join(DEST, 'losangeles_%s.pck' % v)) == target)
     print('installed into %d/9 variants (hash checked).' % ok)
     print('REMINDER: .ppf/props/peds/traffic/bnd untouched; restart without an old savestate.')
 

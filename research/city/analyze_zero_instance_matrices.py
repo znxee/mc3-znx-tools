@@ -5,7 +5,7 @@ import sys
 
 
 STATE = os.path.join(os.environ.get('MC3_PCSX2_DATA', 'PCSX2'), 'sstates/SLUS-21355 (B3FD5361).01.p2s')
-PCK = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools', 'output', 'modcity_la_v9_cadeia_local.pck')
+PCK = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools', 'output', 'losangeles_la_v9_cadeia_local.pck')
 TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools')
 
 

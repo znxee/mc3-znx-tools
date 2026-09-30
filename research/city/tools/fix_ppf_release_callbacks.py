@@ -23,7 +23,7 @@ def main() -> int:
         raise FileExistsError(f"refusing to overwrite {args.output_city}")
     shutil.copytree(args.source_city, args.output_city)
 
-    ppf = args.output_city / "modcity_midnight_clear.ppf"
+    ppf = args.output_city / "losangeles_midnight_clear.ppf"
     manifest_path = ppf.with_suffix(".manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     data = bytearray(ppf.read_bytes())

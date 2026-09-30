@@ -14,7 +14,7 @@ from native_texture_codec import pixels,palette
 from audit_city_graph import audit_ppf
 
 def main():
-    previous=TOOLS/'output/mc2_losangeles/compiled_ppf/modcity_midnight_clear'
+    previous=TOOLS/'output/mc2_losangeles/compiled_ppf/losangeles_midnight_clear'
     old=previous.with_suffix('.ppf').read_bytes()
     assert hashlib.sha256(old).hexdigest()=='9658efad124e0f527cb4f7715caacae97acf69f3b2a37738514ccc8b3e9f9b0b'
     data=bytearray(old)
@@ -47,7 +47,7 @@ def main():
         t['native_clut256']=int(bpp==8)
     dest=ROOT/'candidate'
     dest.mkdir(exist_ok=True)
-    out=dest/'modcity_midnight_clear.ppf'
+    out=dest/'losangeles_midnight_clear.ppf'
     if out.exists(): raise FileExistsError('Refusing to overwrite '+str(out))
     out.write_bytes(data)
     m.update({'output':str(out),'sha256':hashlib.sha256(data).hexdigest(),

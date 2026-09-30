@@ -1450,7 +1450,7 @@ def grid_from_extents(mn, mx):
     Copying the donor's grid with different extents shifts the culling: LA asks
     for 91x82 and origin (-50,-43), atlanta gives 64x62 and origin (-50,-43) as
     well - the 62 is atlanta's, which is why the swap goes unnoticed. Measured on
-    the file: modcity_la_v5 comes out (91,82,-50,-43), which is exactly the sum
+    the file: losangeles_la_v5 comes out (91,82,-50,-43), which is exactly the sum
     from the extents of MC2's losangeles.lvl (-2000..1600 / -1720..1520).
     """
     ox = int(math.floor(mn[0] / 40.0)); oz = int(math.floor(mn[2] / 40.0))
@@ -2513,7 +2513,7 @@ def build_place(out_path, donor, place, models_dir, n_slots=1329,
     # THE HOOD NAMES ARE A CONTRACT with whoever registers the city, which is why
     # the declared list has to be known ALREADY HERE: this is where the
     # components become contiguous blocks per hood, and relocating later no
-    # longer touches the blocks already emitted. city_slot6.mod registers modcity
+    # longer touches the blocks already emitted. city_slot6.mod registers losangeles
     # with TWELVE hoods; a .pck declaring the donor's seven left the game in
     # ENDLESS LOADING - measured in a savestate with the game alive at 59.9 Hz and
     # city 5 requested on both sinks. Same class as cell_count.
@@ -2565,7 +2565,7 @@ def build_place(out_path, donor, place, models_dir, n_slots=1329,
     # without geometry keeps a zero count and an empty array - that is what
     # retail does, and what the cube path already did.
     # THE HOOD NAMES ARE A CONTRACT with whoever registers the city.
-    # city_slot6.mod registers modcity with TWELVE hoods; if the .pck declares
+    # city_slot6.mod registers losangeles with TWELVE hoods; if the .pck declares
     # the donor's seven, the game asks for a hood that does not exist and stays
     # in ENDLESS LOADING - measured on 03/09/2026 in a savestate showing the game
     # alive at 59.9 Hz, with city 5 requested on both sinks and never getting in.

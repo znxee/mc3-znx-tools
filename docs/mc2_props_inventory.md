@@ -175,5 +175,5 @@ Loose prop models in `ASSETS/model/`: **5**.
 
 Files named `*.bangerdata` anywhere under `ASSETS/`: **0**. MC2 gives every breakable prop one in `tune/banger/`.
 
-Prop `.pck` files in `resources/city/` (midnight/clear only): `modcity_midnight_clear_garage_props.pck`, `modcity_midnight_clear_props.pck`. Their contents were not inspected by this tool; `mc2_props.py` (Fork City MODS) reports that the installed `modcity` ones are Tokyo's.
+Prop `.pck` files in `resources/city/` (midnight/clear only): `losangeles_midnight_clear_garage_props.pck`, `losangeles_midnight_clear_props.pck`. Their contents were not inspected by this tool; `mc2_props.py` (Fork City MODS) reports that the installed `losangeles` ones are Tokyo's.
 

@@ -1,8 +1,8 @@
 r"""Install a city .pck into the weather variants - and ONLY into them.
 
-WHY THIS EXISTS. I installed a city with a `startswith('modcity_')` loop that
-only excluded `_fog` and `_bnd`, and it OVERWROTE `modcity_peds.pck` (kind 0x21)
-and `modcity_traffic.pck` (kind 0x3C) with a city file (kind 0x43). The game
+WHY THIS EXISTS. I installed a city with a `startswith('losangeles_')` loop that
+only excluded `_fog` and `_bnd`, and it OVERWROTE `losangeles_peds.pck` (kind 0x21)
+and `losangeles_traffic.pck` (kind 0x3C) with a city file (kind 0x43). The game
 opened the peds, found a city, and stayed in ENDLESS LOADING - with the EE alive
 at 60 Hz, which made the symptom look like a geometry problem. Filtering by
 prefix is fragile; this script filters by the KIND in the header, which is what
@@ -12,7 +12,7 @@ THE CELL CONTRACT IS CHECKED TOO: cell_count sits at MapRoot+0x268 and has to be
 the same in <city>.pck, _props.pck and _peds.pck. A new city with different
 extents changes the grid and breaks the contract silently.
 
-    python mc3_install_city.py city.pck --dest <ASSETS/resources/city> --prefix modcity
+    python mc3_install_city.py city.pck --dest <ASSETS/resources/city> --prefix losangeles
 """
 import argparse
 import os

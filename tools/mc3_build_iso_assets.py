@@ -1,4 +1,4 @@
-"""Build the console ASSETS.DAT without compressing the modcity PCK/PPF files.
+"""Build the console ASSETS.DAT without compressing the losangeles PCK/PPF files.
 
 The ported city loads those packages as raw data. Compressing them with the
 normal dave.py profile saves space, but freezes the game while the city loads
@@ -14,11 +14,11 @@ import struct
 
 DEFAULT_ROOT = os.environ.get('MC3_ISO_SOURCE', 'mod iso - build source')
 RAW_PREFIXES = (
-    'resources/city/modcity_',
-    'resources/prop/modcity_',
+    'resources/city/losangeles_',
+    'resources/prop/losangeles_',
 )
 
-MODCITY_FLASH = (
+LOSANGELES_FLASH = (
     'loading_generic_m.pck',
     'loading_network_m.pck',
     *(f'loading_network_m{i:02d}.pck' for i in range(1, 11)),
@@ -46,10 +46,10 @@ def main():
     ap.add_argument('--dave', default=os.path.join(DEFAULT_ROOT, 'dave.py'))
     args = ap.parse_args()
 
-    missing = [name for name in MODCITY_FLASH
+    missing = [name for name in LOSANGELES_FLASH
                if not os.path.isfile(os.path.join(args.source, 'flash', name))]
     if missing:
-        raise SystemExit('missing modcity flash: ' + ', '.join(missing))
+        raise SystemExit('missing losangeles flash: ' + ', '.join(missing))
 
     dave = load_dave(args.dave)
     dave.COMP_DIR_BLOCKLIST = tuple(dict.fromkeys(

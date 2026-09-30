@@ -112,7 +112,7 @@ def check_structure(b, kind, problems, info, note_only_headers=False):
         blocks += 1
         # In the four retail cities EVERY child vector, in both trees, is
         # preceded by the 16-byte array header (count followed by 0xCD): the
-        # blocks sit 48 bytes apart in type9 and 32 in type10. The modcity type9
+        # blocks sit 48 bytes apart in type9 and 32 in type10. The losangeles type9
         # has none - it is a divergence inherited from the converter, not
         # something this candidate introduces, so it is reported and not failed
         # when the donor has the same shape.

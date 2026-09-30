@@ -7,7 +7,7 @@ import mc3_v7_to_current as t
 
 TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools')
 BASE = os.path.join(os.environ.get('MC3_WORK', '.'), "backups", "Fork City MODS 2",
-                    "2026-09-20_forge_bisect", "before", "modcity_midnight_clear.pck")
+                    "2026-09-20_forge_bisect", "before", "losangeles_midnight_clear.pck")
 FORGED = os.path.join(os.environ.get('MC3_WORK', '.'), 'output', 'la_forge3_local')
 REFERENCE = os.path.join(os.environ.get('MC3_WORK', '.'), "backups", "LA_before_forge_2026-09-20",
                          "la729_local_components_20260906")

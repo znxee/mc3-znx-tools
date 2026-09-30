@@ -7,7 +7,7 @@ from pathlib import Path
 candidate = Path(__file__).resolve().parents[1] / "output" / "mip_proxy_v7"
 active = Path(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'ASSETS/resources/city'))
 rows = []
-for source in sorted(candidate.glob("modcity_*.pck")):
+for source in sorted(candidate.glob("losangeles_*.pck")):
     target = active / source.name
     left = source.read_bytes()
     right = target.read_bytes()

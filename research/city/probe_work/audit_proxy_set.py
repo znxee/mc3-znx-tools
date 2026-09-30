@@ -16,7 +16,7 @@ TEX1_MASK = 0xFFE00000
 rows = []
 passed = True
 
-for candidate in sorted(CANDIDATES.glob("modcity_*.pck")):
+for candidate in sorted(CANDIDATES.glob("losangeles_*.pck")):
     source = ACTIVE / candidate.name
     audit = json.loads(candidate.with_suffix(".audit.json").read_text(encoding="utf-8"))
     old = source.read_bytes()

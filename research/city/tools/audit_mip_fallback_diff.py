@@ -101,7 +101,7 @@ def main() -> int:
     old_manifest = json.loads(args.old_manifest.read_text(encoding="utf-8"))
     new_manifest = json.loads(args.new_manifest.read_text(encoding="utf-8"))
     records = []
-    for after_path in sorted(args.after_dir.glob("modcity_*.pck")):
+    for after_path in sorted(args.after_dir.glob("losangeles_*.pck")):
         before_path = args.before_dir / after_path.name
         before, after = before_path.read_bytes(), after_path.read_bytes()
         if len(before) != len(after):

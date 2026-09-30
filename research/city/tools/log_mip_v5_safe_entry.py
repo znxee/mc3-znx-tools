@@ -32,8 +32,8 @@ def main() -> int:
             "multi-owner; diff of the nine PCKs PASS, zero unexpected change."
         ),
         "--affects", (
-            "The nine $MC3_HOSTFS/ASSETS/resources/city/modcity_{dawn,dusk,midnight}_"
-            "{clear,cloudy,rainy}.pck and modcity_midnight_clear.ppf. Does not change "
+            "The nine $MC3_HOSTFS/ASSETS/resources/city/losangeles_{dawn,dusk,midnight}_"
+            "{clear,cloudy,rainy}.pck and losangeles_midnight_clear.ppf. Does not change "
             "the ELF, C++ mods, geometry, collision or PCSX2 configuration. Pre-v5 "
             "backup in backups/Fork City TEXTURES/2026-09-13_mip_fallback_v5_safe/before/city. "
             "Crash savestate kept in $MC3_WORK/output/"

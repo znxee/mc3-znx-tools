@@ -21,7 +21,7 @@ the all-static-components manifest currently staged in HostFS.
 ## Default city renderer, and what the installer copies
 
 This module is the default in `$MC3_HOSTFS/mc3boot.ini`
-(`city_mc2_rsc_draw_test.mod = defer`, `modcity_page_pool.mod = shim`,
+(`city_mc2_rsc_draw_test.mod = defer`, `losangeles_page_pool.mod = shim`,
 `city_mc2_scene.mod = 0`). Since 2026-09-26 it reads **only original MC2
 files** - nothing generated from MC2 data ships with the mod. Whoever installs
 it copies from their own MC2 PS2 disc, with the original names:
@@ -40,9 +40,9 @@ The variant loaded follows `[boot] time` / `weather` (default
 `midnight_clear`). **Nothing else**: since 2026-09-26 the VU bootstrap is
 built at run time (below), so `mc2_rsc_vu_bootstrap.vcl` is no longer read.
 
-Collision comes from the same `losangeles.rsc` too: `modcity_bound.mod = shim`
-builds ModCity's `_bnd` body at load time from its two BND0 blocks, and
-`modcity_bnd.pck` is not installed any more (see `../modcity_bound/README.md`).
+Collision comes from the same `losangeles.rsc` too: `losangeles_bound.mod = shim`
+builds Los Angeles's `_bnd` body at load time from its two BND0 blocks, and
+`losangeles_bnd.pck` is not installed any more (see `../losangeles_bound/README.md`).
 
 ### VU bootstrap built at run time
 
@@ -129,7 +129,7 @@ Level layouts were checked offline (level 1 decoded vs level 0 downscaled, all
 formats) and in game (A/B with `[boot] mc2m = 0`, level 0 only: differences
 follow fine texture detail, strongest far away). At the spawn: 410 uploads,
 2.8 MB per frame, 0 dropped, ~30 FPS; free heap after everything 5.3 MB with
-`modcity_page_pool`. Markers `RTEX` (images, bytes kept), `RDTE` (texture error:
+`losangeles_page_pool`. Markers `RTEX` (images, bytes kept), `RDTE` (texture error:
 2/3 plan/memory, 4 read, 5 arena memory, 6/7/8 shared bank open/memory/format,
 9 tables).
 
@@ -157,7 +157,7 @@ values read from the GS and VU1 memory of an MC2 savestate:
 
 Checked with a camera put over `l_industrial_rd_17` (asphalt with lane
 markings, from above and at street level; captures
-`Y:/temp/asfalto_20260925/`). The ModCity spawn is inside the
+`Y:/temp/asfalto_20260925/`). The Los Angeles spawn is inside the
 convention-centre block, where there is no street.
 
 Diagnostic `[boot]` keys added: `mc2x`/`mc2y`/`mc2z` put the game camera at a
@@ -193,7 +193,7 @@ PMD0s. The runtime now does the same:
   handles are found by binary search (a linear scan per CALL cost ~0.3 ms of
   EE per building: 30 -> 19 FPS).
 
-At the ModCity spawn: 503 PCP0 draws + 174 PMD0 draws, 0 failures, 303
+At the Los Angeles spawn: 503 PCP0 draws + 174 PMD0 draws, 0 failures, 303
 uploads, ~30 FPS, `midnight_clear` and `dusk_clear` checked. Captures:
 `Y:/temp/cpvs_20260925/` (`test8`, `dusk`).
 
@@ -252,7 +252,7 @@ instances use CPVS; default 3, `0` = flat), `mc2n` (max CPVS chains per frame).
 
   **Why v2 / the coloured strip at the bottom.** v1 put the textures at fixed
   blocks `0x1500..0x3fff`, a range free in the standalone MC2 scene but not in
-  game. Savestate at the ModCity spawn: MC3 renders into `FRAME FBP 0x40`
+  game. Savestate at the Los Angeles spawn: MC3 renders into `FRAME FBP 0x40`
   (blocks `0x800..0x1600`, 512x448 PSMCT32), Z16 at `ZBP 0xB0`
   (`0x1600..0x1D00`), display CT16 at 0, its own per-frame texture ring from
   base `0x1D01` (`0x70FBF0`) up to top `0x3580` (`0x70FBE8`), render targets
@@ -354,7 +354,7 @@ logs for that stage are under
 
 The latest PCSX2 run loaded all 1,010 PMDs, validated 723 models/8,500
 placements, completed the RSC scan in about 23 seconds, and continued to 150
-seconds at `SES=5` (ModCity). `RDAD` remained active; at the fixed camera it
+seconds at `SES=5` (Los Angeles). `RDAD` remained active; at the fixed camera it
 reported 1,904 visible instances and 2,373 visible PMD draws. No renderer,
 VIF, or exception error appeared. The seven early TLB misses at
 `0x3f3ae148` match the previously documented baseline. Captures and log are
@@ -376,7 +376,7 @@ the PS2-hardware VRAM lifetime/performance still needs validation.
 On 2026-09-25 the runtime sphere/frustum test was corrected to take its
 positive-W and side-plane coefficients from the columns of the row-vector
 view-projection matrix. The previous code mixed contiguous rows and could
-reject visible models as the camera turned. At the ModCity spawn, the full
+reject visible models as the camera turned. At the Los Angeles spawn, the full
 renderer changed from 2,373 submitted PMD draws / about 16k PCSX2 primitives
 to 863 submitted draws / about 46k primitives; the newly selected geometry
 fills several of the large gaps. Both runs reached `SES=5`, loaded all 1,010
@@ -417,7 +417,7 @@ GIFtag templates, not culling, draw order or VU prefill: `data[36]`/`data[37]`
 were copies of the strip template `data[35]`, while the `rv1_code` clipper
 emits clipped polygons as fans (native MC3 uses PRIM 5 there). The installed
 `mc2_rsc_vu_bootstrap.vcl` differs from the previous one in exactly those two
-bytes, and `make_vu_bootstrap.py` now produces it. At the ModCity spawn the
+bytes, and `make_vu_bootstrap.py` now produces it. At the Los Angeles spawn the
 large wedge in the upper left is gone with the same ~46.6k primitives;
 comparison `Y:/temp/clip_fan_20260925/compare_rsc_t075.png`. See
 `city_mc2_scene/README.md` for the mechanism and `patch_clip_template.py`.

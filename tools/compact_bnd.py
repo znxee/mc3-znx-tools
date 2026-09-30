@@ -10,7 +10,7 @@ geometry at the end of the file and leaves the old one orphaned. Nobody deletes
 anything, so the file only grows and most of it becomes garbage the game loads
 into RAM and never reads.
 
-Measured: the 08/09 `modcity_bnd.pck` was already **42.4 % dead space**, and the
+Measured: the 08/09 `losangeles_bnd.pck` was already **42.4 % dead space**, and the
 v17..v20 candidates reached **55 %**. Fork City MODS measured the effect on the
 console and the result was harsh: freeroam stopped loading: 2.4 MB were free in
 total but the LARGEST CONTIGUOUS BLOCK was 0.48 MB, and the 3.60 MB bnd did not

@@ -1,4 +1,4 @@
-"""Python twin of modcity_bound.mod: builds the same MC3 _bnd body from MC2's
+"""Python twin of losangeles_bound.mod: builds the same MC3 _bnd body from MC2's
 losangeles.rsc (BND0) + the tokyo_bnd.pck skeleton. Usage: build_reference.py OUT.pck
 (Region order differs from the mod: here each tree keeps polys/verts/idx/blocks
 together; the mod puts all geometry first and both trees last. Same content.)"""

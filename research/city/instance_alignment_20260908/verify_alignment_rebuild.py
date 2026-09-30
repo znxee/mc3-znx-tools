@@ -39,7 +39,7 @@ def main():
             if exc.code not in (None, 0):
                 raise
     (HERE / 'before_build.log').write_text(log.getvalue(), encoding='utf-8')
-    assert sha(OLD) == sha(BACKUP / 'modcity_midnight_clear.pck'), 'Recipe differs from active PCK'
+    assert sha(OLD) == sha(BACKUP / 'losangeles_midnight_clear.pck'), 'Recipe differs from active PCK'
     before, after = Audit(OLD), Audit(NEW)
     tab0, tab1 = before.off(before.u(0x98)), after.off(after.u(0x98))
     mapping = {}

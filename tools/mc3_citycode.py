@@ -33,7 +33,7 @@ them comes up with no traffic at all.
     tune/race/<name>     tune/traffic/<name>
 
 They are cloned whole, and files INSIDE get the same renaming - `tokyo_dawn
-.density` becomes `modcity_dawn.density`, while `dawn_clear/` and `fped01.cal`
+.density` becomes `losangeles_dawn.density`, while `dawn_clear/` and `fped01.cal`
 keep the names they have. A destination that already exists is merged into, not
 replaced: hand-made files there survive.
 """

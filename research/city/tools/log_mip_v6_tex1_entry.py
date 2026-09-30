@@ -16,7 +16,7 @@ def main() -> int:
         "--changed", (
             "MIP FALLBACK V6 TEX1 INSTALLED AND TESTED WITH THE COMO_TESTO.md METHOD. "
             "After v5-safe the user had no Exception any more, but the frontend "
-            "showed No Image. A headless control boot confirmed modcity in the frontend "
+            "showed No Image. A headless control boot confirmed losangeles in the frontend "
             "(SES=00000005), span 219.7803 s and zero Exception/cpuTlbMiss, but revealed "
             "50 'TLB Miss' lines the old summariser ignores; 43 were in "
             "rmcTextureProxyPS2::Bind 0x2BA240/2BA2C4/2BA328/2BA588, with small "
@@ -35,7 +35,7 @@ def main() -> int:
             "diff of the nine PCKs PASS, zero unexpected bytes; PPF callbacks 0/1418 unsafe."
         ),
         "--affects", (
-            "Nine modcity_{dawn,dusk,midnight}_{clear,cloudy,rainy}.pck. The PPF did "
+            "Nine losangeles_{dawn,dusk,midnight}_{clear,cloudy,rainy}.pck. The PPF did "
             "not change from v5-safe. Separately, the sum of the seven '=1' mods was "
             "11572 against the 11384 limit; debug_draw, being last, could be refused. "
             "For the texture diagnosis period, peds.mod was changed from 1 to 0, "

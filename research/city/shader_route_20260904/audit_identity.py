@@ -7,7 +7,7 @@ from inspect_contract import ROOT, TOOLS, native_texture, off, u32, source_palet
 
 def main():
     mapping={int(k):v for k,v in (line.split('\t') for line in (TOOLS/'output/la_tex_mapa.tsv').read_text().splitlines())}
-    comp=TOOLS/'output/mc2_losangeles/compiled_ppf/modcity_midnight_clear'
+    comp=TOOLS/'output/mc2_losangeles/compiled_ppf/losangeles_midnight_clear'
     ppf=comp.with_suffix('.ppf').read_bytes()
     manifest=json.loads(comp.with_suffix('.manifest.json').read_text())
     byname={m['texture'].lower():m for m in manifest['textures']}

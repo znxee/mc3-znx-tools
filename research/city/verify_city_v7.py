@@ -8,8 +8,8 @@ sys.path.insert(0,str(T));import mc3_city_build as B
 u=lambda d,o:struct.unpack_from('<I',d,o)[0]
 h=lambda d,o:struct.unpack_from('<H',d,o)[0]
 def main():
-    old=(T/'output/modcity_la_v6_alpha2004.pck').read_bytes()
-    new=(W/'modcity_la_v7_vif_local.pck').read_bytes();assert len(old)==len(new)
+    old=(T/'output/losangeles_la_v6_alpha2004.pck').read_bytes()
+    new=(W/'losangeles_la_v7_vif_local.pck').read_bytes();assert len(old)==len(new)
     base=u(new,0)
     def f(va,n=4):
         o=va-base+128;assert 128<=o<=len(new)-n;return o
@@ -78,6 +78,6 @@ def main():
     actual=[i for i,(a,b) in enumerate(zip(old,new)) if a!=b]
     outside=[i for i in actual if not allow[i]];assert not outside,outside[:20]
     report={'passed':True,'counts':dict(count),'actual_changed_bytes':len(actual),'changed_bytes_outside_vif':len(outside),'max_world_reconstruction_error':max_world_error,'sha256':hashlib.sha256(new).hexdigest(),'models':models}
-    (W/'modcity_la_v7_validation.json').write_text(json.dumps(report,indent=2))
+    (W/'losangeles_la_v7_validation.json').write_text(json.dumps(report,indent=2))
     print(json.dumps({k:v for k,v in report.items() if k!='models'},indent=2))
 if __name__=='__main__':main()

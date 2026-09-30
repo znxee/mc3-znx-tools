@@ -15,8 +15,8 @@ sys.path.insert(0, str(TOOLS))
 import mc3_city_build as city  # noqa: E402
 import mc3_hood_fill as hf  # noqa: E402
 
-V7 = TOOLS / "output" / "modcity_la_v7_vif_local.pck"
-V9 = TOOLS / "output" / "modcity_la_v9_cadeia_local.pck"
+V7 = TOOLS / "output" / "losangeles_la_v7_vif_local.pck"
+V9 = TOOLS / "output" / "losangeles_la_v9_cadeia_local.pck"
 
 
 def u16(data: bytes, off: int) -> int:

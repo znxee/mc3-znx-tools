@@ -21,7 +21,7 @@ builder.
    differ. 507/510 palettes differ too. The rebuilt encoder now reproduces
    **965/965 payloads and 510/510 palettes**, byte for byte.
 3. **The builder shares serialised objects that get their constructor run
-   several times.** In the snapshots `modcity_downtown_tex.pck`, `_resid.pck`
+   several times.** In the snapshots `losangeles_downtown_tex.pck`, `_resid.pck`
    and `_rt2.pck`, there are 9,180 non-null slots for 510 shaders: 8,670 extra
    visits. A second call relocates `shader+0x08` again. Resident does not remove
    this problem; it happens before page recycling even comes into it.
@@ -33,7 +33,7 @@ builder.
    fields.** The retail code at 0x2BA830 explicitly accepts resident. It does not
    interpret the incoming token to choose offsets, nor does it request pages.
 
-The new candidate is `candidate/modcity_midnight_clear.ppf`:
+The new candidate is `candidate/losangeles_midnight_clear.ppf`:
 
 - 36,413,440 bytes; 522 pages; 965 chunks; 510 textures.
 - SHA-256 `b2543bdc1ceabba305b707d48837070e8226e69fb6a2593b0967e9bd1ee7eb12`.

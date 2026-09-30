@@ -208,7 +208,7 @@ def build(texmod, source_dir: Path, output: Path, manifest_tsv: Path,
         "source": str(source_dir),
         "output": str(output),
         "sha256": sha256,
-        "file_id_for_current_modcity": FILE_ID,
+        "file_id_for_current_losangeles": FILE_ID,
         "page_stride": PF_STRIDE,
         "page_count": len(pages),
         "page_packing": "dense_sequential",
@@ -298,7 +298,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Compile MC2 PS2 .tex files into a pf05 PPF for MC3")
     ap.add_argument("--source", type=Path, default=Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools', 'output', 'mc2_losangeles/texture')))
     ap.add_argument("--mc3-tex", type=Path, default=Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools', 'mc3_tex.py')))
-    ap.add_argument("--output", type=Path, default=Path(os.path.join(os.environ.get('MC3_WORK', '.'), 'output', 'mc2_city_ppf/modcity_midnight_clear.ppf')))
+    ap.add_argument("--output", type=Path, default=Path(os.path.join(os.environ.get('MC3_WORK', '.'), 'output', 'mc2_city_ppf/losangeles_midnight_clear.ppf')))
     args = ap.parse_args()
     manifest_tsv = args.output.with_suffix(".refs.tsv")
     manifest_json = args.output.with_suffix(".manifest.json")

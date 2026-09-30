@@ -42,7 +42,7 @@ def repack(source_ppf: Path, source_manifest: Path, output: Path) -> dict:
         return len(pages) - 1
 
     page = new_page()
-    file_id = int(manifest["file_id_for_current_modcity"])
+    file_id = int(manifest["file_id_for_current_losangeles"])
     for texture in manifest["textures"]:
         for level in texture["levels"]:
             old_at = page_start(old, int(level["page"])) + int(level["page_offset"])

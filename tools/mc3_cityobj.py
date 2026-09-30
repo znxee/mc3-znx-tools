@@ -12,7 +12,7 @@ The geometry side is not new work: `mc3_view.py` already walks the real graph
 VIF packets with the mask handled, and places each mesh through its 3x4. This
 only writes what it found as an OBJ and compares two of them.
 
-    python mc3_cityobj.py obj output/modcity_la_v6.pck --out output/la_pck.obj
+    python mc3_cityobj.py obj output/losangeles_la_v6.pck --out output/la_pck.obj
     python mc3_cityobj.py stats output/la_pck.obj
     python mc3_cityobj.py compare output/la_pck.obj output/mc2_la/losangeles.obj
 

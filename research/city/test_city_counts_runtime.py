@@ -11,7 +11,7 @@ from audit_city_counts_runtime import Audit
 
 CURRENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'research', 'city', 'instance_alignment_20260908/downtown_aligned_build_validation.pck')
 BACKUP = os.path.join(os.environ.get('MC3_WORK', '.'), 'backups', 'Fork City MODS 2/2026-09-08_instance_matrix_alignment/before')
-HISTORICAL = BACKUP + r'\modcity_midnight_clear.pck'
+HISTORICAL = BACKUP + r'\losangeles_midnight_clear.pck'
 STATE = BACKUP + r'\SLUS-21355 (B3FD5361).01.p2s'
 
 

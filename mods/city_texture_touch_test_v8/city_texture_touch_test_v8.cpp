@@ -1,8 +1,8 @@
-// Diagnostic v8 for the generated modcity render pipeline.
+// Diagnostic v8 for the generated losangeles render pipeline.
 //
 // V7 did useful tracing, but also ran its complete material validation and an
 // extra rmcModel::TouchShaders on the frontend background city.  V8 is gated
-// to the generated 18-group modcity, records the real CPV selector carried in
+// to the generated 18-group losangeles, records the real CPV selector carried in
 // the sixth argument (t1), and clamps an out-of-range selector to root[0].
 // The generated CPV payloads are identical, so this guard is diagnostic and
 // prevents a bad selector from feeding a null REF/UNPACK pair to VIF1.

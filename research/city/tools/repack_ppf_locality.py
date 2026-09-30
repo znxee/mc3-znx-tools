@@ -175,7 +175,7 @@ def repack(source_ppf: Path, source_manifest: Path, model_map: Path,
                      "single_page_chains": single_page_chains,
                      "split_chains": split_chains}
 
-    file_id = int(manifest["file_id_for_current_modcity"])
+    file_id = int(manifest["file_id_for_current_losangeles"])
     page_data = [bytearray(b"\xCD" * PF_STRIDE) for _ in pages]
     checks = []
     level_bytes = collections.Counter()

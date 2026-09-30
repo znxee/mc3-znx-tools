@@ -4,7 +4,7 @@ Both files live OUTSIDE the .pck, in ASSETS/city/<city>/, and carry the city's
 identity: the .graph is the pedestrian navigation graph (text) and the _pvs.aib
 is a TSV1 container whose first record is the extents.
 
-Measured on 12/09: modcity.graph and modcity_pvs.aib were BYTE-FOR-BYTE COPIES
+Measured on 12/09: losangeles.graph and losangeles_pvs.aib were BYTE-FOR-BYTE COPIES
 of tokyo's - same sha256 - so Los Angeles ran with Tokyo's pedestrian graph and
 extents (-1873.8..1433.9 against LA's -2000..1600), and the _pvs.aib still
 declared the name 'tokyo' in record id=08.
@@ -124,7 +124,7 @@ def main(argv=None):
     p.add_argument('--reference', required=True,
                    help='retail _pvs.aib the record sequence comes from')
     p.add_argument('--out-path', required=True, help='ASSETS/city/<city> folder')
-    p.add_argument('--prefix', default='modcity', help='file prefix')
+    p.add_argument('--prefix', default='losangeles', help='file prefix')
     a = p.parse_args(argv)
 
     ext = extents_from_place(a.place)

@@ -1,4 +1,4 @@
-// Diagnostic v5 for the generated modcity texture-demand path.
+// Diagnostic v5 for the generated losangeles texture-demand path.
 //
 // The v1 bridge had all eight call-site hooks installed, but save 01 still had
 // 207/207 datChunkRef::data == 0, all 835 page-state words == 0, and an empty

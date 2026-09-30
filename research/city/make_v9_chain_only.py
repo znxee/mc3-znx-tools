@@ -8,9 +8,9 @@ import struct
 from pathlib import Path
 
 TOOLS = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
-V7 = TOOLS / "output" / "modcity_la_v7_vif_local.pck"
-V9 = TOOLS / "output" / "modcity_la_v9_cadeia_local.pck"
-OUT = TOOLS / "output" / "modcity_la_v9_chain_only_from_v7.pck"
+V7 = TOOLS / "output" / "losangeles_la_v7_vif_local.pck"
+V9 = TOOLS / "output" / "losangeles_la_v9_cadeia_local.pck"
+OUT = TOOLS / "output" / "losangeles_la_v9_chain_only_from_v7.pck"
 
 
 def u32(data: bytes | bytearray, off: int) -> int:

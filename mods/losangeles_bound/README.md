@@ -1,7 +1,7 @@
-# modcity_bound
+# losangeles_bound
 
-ModCity's collision built at load time from MC2's own `losangeles.rsc`, so
-`modcity_bnd.pck` is neither installed nor loaded. INI: `modcity_bound.mod = shim`
+Los Angeles's collision built at load time from MC2's own `losangeles.rsc`, so
+`losangeles_bnd.pck` is neither installed nor loaded. INI: `losangeles_bound.mod = shim`
 (it has to be `shim`: with `[boot] nofe` the city loads before the first frame).
 
 ## What it hooks
@@ -11,7 +11,7 @@ ModCity's collision built at load time from MC2's own `losangeles.rsc`, so
 128-byte header, `aligned_new(body, 128)`, reads the body and returns it, with
 `*out1` = the virtual base the pointers were written against and `*out2` = the
 body size; `mcPhysics(datResource&)` then relocates by `body - base`. For
-ModCity (mcRaceConfig at 0x619B10, +0 == 5) the hook returns a body it built
+Los Angeles (mcRaceConfig at 0x619B10, +0 == 5) the hook returns a body it built
 itself, in that same form (base 0x06800000, allocated with the game's
 `aligned_new`, so the city's `aligned_delete` frees it normally). Any other city
 goes to the original loader untouched.
@@ -53,7 +53,7 @@ doubles the per-leaf limit if the tree would not fit its budget.
 Result for LA: type 9 = 29096 verts, 20379 polys, 45726 refs, 617 blocks,
 depth 8; type 10 = 140 verts, 176 polys (limit 2000/2000), 347 refs, 10 blocks.
 Body 0x1143F0 bytes (1.08 MB) against 0x1A5770 (1.65 MB) for the old
-`modcity_bnd.pck`; the renderer sees ~550 KB more free heap. Build time ~1 s at
+`losangeles_bnd.pck`; the renderer sees ~550 KB more free heap. Build time ~1 s at
 city load.
 
 ## Validation
@@ -75,8 +75,8 @@ fields and the same multiset of leaf contents in both trees.
 ## Caveat
 
 This is MC2's native collision. It does not carry what Fork City COLLISION
-added to `modcity_bnd.pck` (v18-v21: instance asphalt at crossings, curbs,
+added to `losangeles_bnd.pck` (v18-v21: instance asphalt at crossings, curbs,
 its own type-10 ground plane). MC2's own answer for road surfaces is the
 `losangeles_quad_0` quadtree, which is now used as type 10. To go back: set
-`modcity_bound.mod = 0` and restore `modcity_bnd.pck` from
+`losangeles_bound.mod = 0` and restore `losangeles_bnd.pck` from
 `research/city/backups/Fork City MODS/2026-09-26_bound_from_rsc/before/`.

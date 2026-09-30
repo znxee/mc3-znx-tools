@@ -78,7 +78,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("state", type=Path)
     ap.add_argument("--pck", type=Path,
-                    default=Path(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'ASSETS/resources/city/modcity_midnight_clear.pck')))
+                    default=Path(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'ASSETS/resources/city/losangeles_midnight_clear.pck')))
     ap.add_argument("--mesh-dir", type=Path,
                     default=TOOLKIT / "output" / "city_v7_vif_relocation_20260906" /
                     "la729_local_components_20260906")

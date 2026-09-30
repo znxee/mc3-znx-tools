@@ -42,7 +42,7 @@ enum {
     SESSION_POINTER = 0x00619B10u,
     FRONTEND_STATE = 0x006144BCu,
     FRAME_DT = 0x00618E20u,
-    MODCITY_SESSION = 5u,
+    LOSANGELES_SESSION = 5u,
     STATUS_WAIT_SESSION = 1u,
     STATUS_WAIT_CAMERA = 2u,
     STATUS_RUNNING = 3u,
@@ -183,7 +183,7 @@ extern "C" void mod_main()
 
     const mc3_u32 session = word(SESSION_POINTER);
     state->session = session;
-    if (!pointer_ok(session) || word(session) != MODCITY_SESSION) {
+    if (!pointer_ok(session) || word(session) != LOSANGELES_SESSION) {
         state->status = STATUS_WAIT_SESSION;
         return;
     }

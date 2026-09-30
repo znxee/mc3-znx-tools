@@ -438,7 +438,7 @@ def main() -> int:
                                  args.output_dir / "source_textures")
     donors, donor_counts, provenance = inventory_donors(args.donor_pck)
 
-    dense_ppf = args.output_dir / "dense" / "modcity_midnight_clear.ppf"
+    dense_ppf = args.output_dir / "dense" / "losangeles_midnight_clear.ppf"
     dense_ppf.parent.mkdir()
     dense_manifest = dense_ppf.with_suffix(".manifest.json")
     dense_refs = dense_ppf.with_suffix(".refs.tsv")
@@ -449,7 +449,7 @@ def main() -> int:
     donor_report = attach_donors(dense_manifest, args.old_manifest,
                                   donors, donor_counts, provenance)
 
-    final_ppf = args.output_dir / "candidate" / "city" / "modcity_midnight_clear.ppf"
+    final_ppf = args.output_dir / "candidate" / "city" / "losangeles_midnight_clear.ppf"
     final_ppf.parent.mkdir(parents=True)
     packing_report = repacker.repack(dense_ppf, dense_manifest, args.model_map,
                                      args.place, final_ppf)
@@ -458,7 +458,7 @@ def main() -> int:
     old_manifest = json.loads(args.old_manifest.read_text(encoding="utf-8"))
 
     pck_reports = []
-    names = [f"modcity_{time}_{weather}.pck" for time in
+    names = [f"losangeles_{time}_{weather}.pck" for time in
              ("dawn", "dusk", "midnight") for weather in
              ("clear", "cloudy", "rainy")]
     for name in names:

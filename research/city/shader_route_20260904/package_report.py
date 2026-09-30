@@ -19,7 +19,7 @@ def main():
     sources=[Path(os.environ.get('MC3_ELF', 'SLUS_213.55')),
         Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools', 'mc3_city_build.py')),
         Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools', 'output', 'la_tex_mapa.tsv')),
-        Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools', 'output', 'mc2_losangeles/compiled_ppf/modcity_midnight_clear.ppf'))]
+        Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools', 'output', 'mc2_losangeles/compiled_ppf/losangeles_midnight_clear.ppf'))]
     route=json.loads((ROOT/'route_index.json').read_text())
     report={'date':'2026-09-05','fork':'MC3 Textures and Shaders',
         'decompiled_functions':len(route['functions']),

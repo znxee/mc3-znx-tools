@@ -24,7 +24,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Compile MC2 PS2 .tex files into a pf05 PPF")
     ap.add_argument("--source", type=Path, default=Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools', 'output', 'mc2_losangeles/texture')))
     ap.add_argument("--mc3-tex", type=Path, default=Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools', 'mc3_tex.py')))
-    ap.add_argument("--output", type=Path, default=Path(os.path.join(os.environ.get('MC3_WORK', '.'), 'output', 'mc2_city_ppf_v2/modcity_midnight_clear.ppf')))
+    ap.add_argument("--output", type=Path, default=Path(os.path.join(os.environ.get('MC3_WORK', '.'), 'output', 'mc2_city_ppf_v2/losangeles_midnight_clear.ppf')))
     args = ap.parse_args()
     base = load_base()
     original_make_chunk = base.make_chunk

@@ -13,7 +13,7 @@ ROOT = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
 def main() -> int:
     changed = (
         "NATIVE MIP FALLBACK GENERATED, AUDITED AND INSTALLED in the nine base Mod City PCKs and in "
-        "modcity_midnight_clear.ppf. The C++ Fork log confirmed that draw_distance only writes the "
+        "losangeles_midnight_clear.ppf. The C++ Fork log confirmed that draw_distance only writes the "
         "K/L bias the GS uses at build time; it does not create levels. The direct inventory showed "
         "that LA had 56 mip1 textures, 453 mip2 and 1 mip3, while the retail cities mostly use "
         "mip3. The 56 mip1 and the existing mip3 were kept intact; each of the 453 mip2 got a "
@@ -27,7 +27,7 @@ def main() -> int:
         "SHA-256 30D98F5B627AEE7B3741B22CA5612ED78A6954BC9766D7547AFA2C5F624DEF5C."
     )
     affects = (
-        "Any fork that replaces modcity_midnight_clear.ppf or the nine modcity_{dawn,dusk,midnight}_"
+        "Any fork that replaces losangeles_midnight_clear.ppf or the nine losangeles_{dawn,dusk,midnight}_"
         "{clear,cloudy,rainy}.pck; LOD/streaming diagnostics and the C++ Fork draw_distance. No .mod, "
         "geometry, PVS, graph or sky was changed."
     )

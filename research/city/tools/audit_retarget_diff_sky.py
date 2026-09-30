@@ -82,7 +82,7 @@ def sky_graph(data: bytes) -> dict:
 
 def audit(before_dir: Path, after_dir: Path) -> dict:
     records = []
-    for after_path in sorted(after_dir.glob("modcity_*.pck")):
+    for after_path in sorted(after_dir.glob("losangeles_*.pck")):
         before_path = before_dir / after_path.name
         before, after = before_path.read_bytes(), after_path.read_bytes()
         if len(before) != len(after):

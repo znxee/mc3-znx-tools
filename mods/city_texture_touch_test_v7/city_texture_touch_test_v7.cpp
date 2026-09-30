@@ -1,4 +1,4 @@
-// Diagnostic v7 for the generated modcity render pipeline.
+// Diagnostic v7 for the generated losangeles render pipeline.
 //
 // The v1 bridge had all eight call-site hooks installed, but save 01 still had
 // 207/207 datChunkRef::data == 0, all 835 page-state words == 0, and an empty
@@ -8,7 +8,7 @@
 // V6 proved that the hooked Draw calls stop with the frontend city. This
 // version preserves that trace and also hooks the two render dispatches and
 // their eight model-selector calls. Per-city epochs now identify whether the
-// modcity disappears before dispatch, during model selection, or before Draw.
+// losangeles disappears before dispatch, during model selection, or before Draw.
 // It counts wrapper entry before any filter, records
 // the first rejected invariant, and calls the stock rmcModel::TouchShaders
 // rather than duplicating its material walk.  The original Draw call remains

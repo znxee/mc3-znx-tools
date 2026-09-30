@@ -22,7 +22,7 @@ for line in (T / 'output/shader_texture_route_20260905/native_texture_map.tsv').
     if len(cells) >= 3 and cells[0].endswith('.tex'):
         native_names.append(cells[0][:-4].lower())
 native_slot = {name: i for i, name in enumerate(native_names)}
-manifest = json.loads((T / 'output/shader_texture_route_20260905/candidate/modcity_midnight_clear.manifest.json').read_text())
+manifest = json.loads((T / 'output/shader_texture_route_20260905/candidate/losangeles_midnight_clear.manifest.json').read_text())
 ppf = {x['texture'][:-4].lower(): x for x in manifest['textures']}
 
 mesh_dir = W / 'output/la729_local_components_20260906'

@@ -5,7 +5,7 @@ from inspect_contract import ROOT, native_texture, u32
 from audit_city_graph import audit_ppf
 
 def main():
-    candidate=ROOT/'candidate/modcity_midnight_clear.ppf'
+    candidate=ROOT/'candidate/losangeles_midnight_clear.ppf'
     data=candidate.read_bytes()
     manifest=json.loads(candidate.with_suffix('.manifest.json').read_text())
     byname={x['texture'].lower():x for x in manifest['textures']}

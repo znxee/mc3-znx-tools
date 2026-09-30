@@ -56,7 +56,7 @@ the edge of elevated roads.
 
 The type9 comes out byte for byte identical.
 
-    python rebuild_type10_ground_plane.py --donor modcity_bnd.pck \\
+    python rebuild_type10_ground_plane.py --donor losangeles_bnd.pck \\
         --out out.pck --audit audit.json
 """
 

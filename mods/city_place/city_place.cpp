@@ -90,7 +90,7 @@ enum {
     // first version loaded meshes from inside a draw call in the FRONTEND,
     // where no city exists, and hung the boot.
     SESSION       = 0x00619B10,
-    MODCITY_INDEX = 5,
+    LOSANGELES_INDEX = 5,
 
     PLACE_MAGIC   = 0x4D43334C,   // 'MC3L', written by mc3_place.py
 };
@@ -316,7 +316,7 @@ extern "C" void mc3_city_place_draw(mc3_u32 self)
     // that competed with the frontend's own backdrop city for 3585 frames.
     const mc3_u32 sess = *(volatile mc3_u32 *)SESSION;
     const int in_city = valid(sess)
-        && *(volatile mc3_u32 *)sess == (mc3_u32)MODCITY_INDEX;
+        && *(volatile mc3_u32 *)sess == (mc3_u32)LOSANGELES_INDEX;
 
     if (!in_city) {
         if (!g_trace->models)

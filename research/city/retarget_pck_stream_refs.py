@@ -8,7 +8,7 @@ import re
 import struct
 from pathlib import Path
 
-PATTERN = re.compile(r"^modcity_(dawn|dusk|midnight)_(clear|cloudy|rainy)\.pck$")
+PATTERN = re.compile(r"^losangeles_(dawn|dusk|midnight)_(clear|cloudy|rainy)\.pck$")
 
 
 def u16(data: bytes, offset: int) -> int:
@@ -108,7 +108,7 @@ def main() -> int:
     old = json.loads(args.old_manifest.read_text(encoding="utf-8"))
     new = json.loads(args.new_manifest.read_text(encoding="utf-8"))
     reloc = mapping(old, new)
-    inputs = [path for path in sorted(args.input_dir.glob("modcity_*.pck"))
+    inputs = [path for path in sorted(args.input_dir.glob("losangeles_*.pck"))
               if PATTERN.match(path.name)]
     if len(inputs) != 9:
         raise ValueError(f"expected nine PCK variants, found {len(inputs)}")

@@ -13,7 +13,7 @@ from pathlib import Path
 TOKEN = 0x007A2320
 FILE_ID = 123
 MXL_MASK = 0x1C
-NAMES = [f"modcity_{time}_{weather}.pck"
+NAMES = [f"losangeles_{time}_{weather}.pck"
          for time in ("dawn", "dusk", "midnight")
          for weather in ("clear", "cloudy", "rainy")]
 

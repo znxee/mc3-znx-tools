@@ -151,7 +151,7 @@ extern "C" void render_hook(void)
         return;
     // DMA1 was found permanently busy (STR=1, MFIFO mode) while driving a full Atlanta - this
     // build only WAITS for it to go idle (bounded), never forces it off. Testing with the empty
-    // modcity kit to see whether that busy state is proportional to city geometry traffic.
+    // losangeles kit to see whether that busy state is proportional to city geometry traffic.
     int drained = 0;
     for (mc3_u32 spin = 0; spin < 4000000u; ++spin)
         if (!(word(D1_CHCR) & 0x100u)) { drained = 1; break; }

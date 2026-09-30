@@ -1,4 +1,4 @@
-// Diagnostic v6 for the generated modcity texture-demand path.
+// Diagnostic v6 for the generated losangeles texture-demand path.
 //
 // The v1 bridge had all eight call-site hooks installed, but save 01 still had
 // 207/207 datChunkRef::data == 0, all 835 page-state words == 0, and an empty
@@ -6,7 +6,7 @@
 // V5 then showed that all captured calls could belong to the frontend's
 // background city while the final savestate pointed at a different mcCity.
 // This version retains the totals but starts a new epoch whenever CURRENT_CITY
-// changes, separating the frontend scene from the current modcity.
+// changes, separating the frontend scene from the current losangeles.
 // It counts wrapper entry before any filter, records
 // the first rejected invariant, and calls the stock rmcModel::TouchShaders
 // rather than duplicating its material walk.  The original Draw call remains

@@ -11,7 +11,7 @@ FILES = [
     Path(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'core.mod')),
     Path(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'patches_menu.mod')),
     Path(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'city_texture_touch_test.mod')),
-    Path(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'ASSETS/resources/city/modcity_midnight_clear.pck')),
+    Path(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'ASSETS/resources/city/losangeles_midnight_clear.pck')),
 ]
 
 

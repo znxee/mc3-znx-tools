@@ -1,12 +1,12 @@
 // -----------------------------------------------------------------------------
-//  modcity_bound - ModCity's collision built at load time from MC2's own
-//  losangeles.rsc, so modcity_bnd.pck is not needed (and not loaded).
+//  losangeles_bound - Los Angeles's collision built at load time from MC2's own
+//  losangeles.rsc, so losangeles_bnd.pck is not needed (and not loaded).
 //
 //  mcLayerCity::InitPhys asks datRscBuilder::LoadBuild (0x42E810, called at
-//  0x1A937C) for "$/resources/city/modcity_bnd": it reads the 128-byte header,
+//  0x1A937C) for "$/resources/city/losangeles_bnd": it reads the 128-byte header,
 //  aligned_new(body, 128), reads the body and returns it; *out1 = the virtual
 //  base the body's pointers were written against, *out2 = the body size.
-//  mcPhysics then relocates every pointer by (body - base). For ModCity this
+//  mcPhysics then relocates every pointer by (body - base). For Los Angeles this
 //  hook returns a body built here in exactly that form instead.
 //
 //  What goes in, all from files an install already has:
@@ -30,7 +30,7 @@
 //  empty child is a zero-count leaf, never a null) - the same rules as
 //  mc2_bnd_to_mc3.py, which reproduce the retail files.
 //
-//  Anything unexpected -> the original loader runs (modcity_bnd.pck if one is
+//  Anything unexpected -> the original loader runs (losangeles_bnd.pck if one is
 //  still installed). Markers (SIO):
 //    RBN0 <stage> <detail>    failure; stage says where
 //    RBN1 <body> <used>       done: body address and size
@@ -48,7 +48,7 @@ enum {
     ASSET_MANAGER = 0x006D557C,       // datAssetManager*; vtable +36 = Open
     ASSET_EXT_PCK = 0x00618D8C,       // the extension LoadBuild passes
     RACE_CONFIG_CURRENT = 0x00619B10, // mcRaceConfig*; +0 = city index
-    MODCITY_INDEX = 5,
+    LOSANGELES_INDEX = 5,
     STREAM_OPEN = 0x003991F0,
     STREAM_READ = 0x003993A8,
     STREAM_SEEK = 0x003996C0,
@@ -583,7 +583,7 @@ static __attribute__((noinline)) mc3_u32 current_city(void) {
 }
 
 extern "C" mc3_u32 bound_load_hook(mc3_u32 path, mc3_u32 type, mc3_u32 out1, mc3_u32 out2) {
-    if (current_city() == MODCITY_INDEX && type == 9u) {
+    if (current_city() == LOSANGELES_INDEX && type == 9u) {
         G()->rsc = G()->tokyo = 0; G()->body = 0; G()->handles = 0;
         G()->err_stage = G()->err_detail = 0;
         mc3_u32 size = 0;

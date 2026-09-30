@@ -30,7 +30,7 @@
 //
 //  WHY THE NEW SLOT IS LEFT EMPTY - this is the important part
 //
-//  This mod registers "modcity" into slot 5 exactly as city_slot6.mod does,
+//  This mod registers "losangeles" into slot 5 exactly as city_slot6.mod does,
 //  and does NOT put anything in the new slot 6. That is deliberate: patching
 //  the constants above only proves the REGISTRY can be seven long. Whether
 //  the rest of the game tolerates a seventh city is a much bigger question -
@@ -70,7 +70,7 @@ enum {
     CITY_STRIDE            = 76,
 
     CITY_SLOTS_NEW = 7,     // the experiment
-    CITY_MODCITY      = 5,     // modcity, exactly as city_slot6.mod
+    CITY_LOSANGELES      = 5,     // losangeles, exactly as city_slot6.mod
     CITY_PARIS     = 6,     // the new slot - deliberately left empty
 
     NOT_INITIALIZED = 0x0066A492,
@@ -141,8 +141,8 @@ struct city_def {
 
 // Same content city_slot6.mod registers - this experiment is about capacity,
 // not about a different city, so slot 5 stays exactly what was already proved.
-static const city_def g_modcity = {
-    "modcity", "m", 12,
+static const city_def g_losangeles = {
+    "losangeles", "m", 12,
     { "m_bh",  "m_dt",  "m_gh",  "m_hl",  "m_hw",  "m_i05",
       "m_i10", "m_101", "m_105", "m_ind", "m_lax", "m_sm" }
 };
@@ -150,7 +150,7 @@ static const city_def g_paris = {
     "paris", "p", 7,
     { "p_bh", "p_dt", "p_fwy", "p_lf", "p_mt", "p_ug", "p_we" }
 };
-static __attribute__((noinline)) const city_def *modcity(void) { return &g_modcity; }
+static __attribute__((noinline)) const city_def *losangeles(void) { return &g_losangeles; }
 static __attribute__((noinline)) const city_def *paris(void) { return &g_paris; }
 
 static void sio_word(int a, int b, int c, int d, mc3_u32 v)
@@ -190,8 +190,8 @@ extern "C" void mc3_city_paris_slot7(void)
     sio_word(67, 67, 69, 78, *(volatile mc3_u32 *)(extra + 0));  // CCEN <name ptr>
     sio_word(67, 67, 69, 72, *(volatile mc3_u32 *)(extra + 12)); // CCEH <hood count>
 
-    // Slot 5: register modcity, with the same guard city_slot6.mod uses.
-    const mc3_u32 slot5 = base + (mc3_u32)(CITY_MODCITY * CITY_STRIDE);
+    // Slot 5: register losangeles, with the same guard city_slot6.mod uses.
+    const mc3_u32 slot5 = base + (mc3_u32)(CITY_LOSANGELES * CITY_STRIDE);
     const mc3_u32 was_name = *(volatile mc3_u32 *)(slot5 + 0);
     if (was_name != (mc3_u32)NOT_INITIALIZED) {
         s->slot5_status = 2;
@@ -199,7 +199,7 @@ extern "C" void mc3_city_paris_slot7(void)
         return;
     }
 
-    const city_def *const c = modcity();
+    const city_def *const c = losangeles();
     MC3_CALL5(void, CITY_REGISTER, mc3_u32, const char *, const char *,
               int, const char *const *)
         (slot5, c->name, c->code,
@@ -236,7 +236,7 @@ extern "C" void mc3_city_paris_slot7_after_load(void)
     // it exactly as it already does today for any unclaimed record, and there
     // is no such file, so nothing loads. A non-zero here would be the actual
     // surprise.
-    const mc3_u32 slot5 = s->base + (mc3_u32)(CITY_MODCITY * CITY_STRIDE);
+    const mc3_u32 slot5 = s->base + (mc3_u32)(CITY_LOSANGELES * CITY_STRIDE);
     const mc3_u32 extra = s->base + (mc3_u32)(CITY_PARIS * CITY_STRIDE);
     sio_word(67, 67, 82, 53, *(volatile mc3_u32 *)(slot5 + 0x14));  // CCR5
     sio_word(67, 67, 82, 54, *(volatile mc3_u32 *)(extra + 0x14));  // CCR6

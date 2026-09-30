@@ -115,7 +115,7 @@ struct city_def {
 // Build the matching skeleton with:
 //   python mc3_city_build.py --donor atlanta_midnight_clear.pck //       --hoods bh,dt,gh,hl,hw,i05,i10,101,105,ind,lax,sm --out-path ...
 static const city_def g_city = {
-    "modcity", "m",
+    "losangeles", "m",
     { "m_bh",  "m_dt",  "m_gh",  "m_hl",  "m_hw",  "m_i05",
       "m_i10", "m_101", "m_105", "m_ind", "m_lax", "m_sm" }
 };
@@ -188,7 +188,7 @@ extern "C" void mc3_city_slot6()
 //
 //  So this runs the loader and photographs the table on the way out. That loop
 //  walks records 0 through 5, so by here it has already tried to open
-//  "tune/race/modcity.loc" - and whether that worked is the whole question.
+//  "tune/race/losangeles.loc" - and whether that worked is the whole question.
 // -----------------------------------------------------------------------------
 extern "C" void mc3_city_after_load()
 {

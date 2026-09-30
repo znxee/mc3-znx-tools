@@ -560,7 +560,7 @@ def _mc3_section(args, cities):
         if os.path.isdir(city_dir) else []
     out += ['', 'Prop `.pck` files in `resources/city/` (midnight/clear only): %s. Their '
             'contents were not inspected by this tool; `mc2_props.py` (Fork City MODS) '
-            'reports that the installed `modcity` ones are Tokyo\'s.'
+            'reports that the installed `losangeles` ones are Tokyo\'s.'
             % (', '.join('`%s`' % p for p in pcks) or 'none'), '']
     return out
 

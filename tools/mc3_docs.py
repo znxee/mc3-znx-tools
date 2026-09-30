@@ -1031,18 +1031,18 @@ CONTENT = [
           "alone</b>: MC2 writes 0 in neighbour 3, and its neighbours are edge indices, not "
           "polygons. Read with MC3's v3 == 0 and n3 == 0xFFFF rule, ~7800 triangles turn into "
           "quads that reach vertex 0 of their cell."),
- ("p", "<font face=Courier>modcity_bound.mod</font> hooks the jal to "
+ ("p", "<font face=Courier>losangeles_bound.mod</font> hooks the jal to "
        "<font face=Courier>datRscBuilder::LoadBuild</font> (0x42E810) at 0x1A937C in "
        "<font face=Courier>mcLayerCity::InitPhys</font>. The loader returns a body allocated "
        "with <font face=Courier>aligned_new(size, 128)</font>, *out1 = the virtual base "
        "(0x06800000) and *out2 = the size, and <font face=Courier>mcPhysics</font> relocates "
        "by the difference - so a body built in the heap in that form is accepted as if it were "
-       "the file. For ModCity it takes 0x330 bytes of non-geometry objects from "
+       "the file. For Los Angeles it takes 0x330 bytes of non-geometry objects from "
        "<font face=Courier>tokyo_bnd.pck</font>, the otgrid as type 9 and the quad as type 10 "
        "(140 verts / 176 polys), and builds both trees on the EE. The quadtree's quadrant bits "
        "are bit0 = x, bit1 = z (222 of 222 tokyo references in the right cell). LA: 20379 "
        "polygons, 45726 references, 617 blocks; 1.08 MB against 1.65 MB for the converted "
-       "<font face=Courier>modcity_bnd.pck</font>, which is no longer installed."),
+       "<font face=Courier>losangeles_bnd.pck</font>, which is no longer installed."),
 
  ("h3", "The traffic network (_city.aib)"),
  ("p", "<font face=Courier>ASSETS/city/&lt;city&gt;/&lt;city&gt;_city.aib</font> is a TaggedStream: "
@@ -1051,7 +1051,7 @@ CONTENT = [
        "0x4105 traffic control, 0x4106 router (0x4200/0x4205 inside), 0x4108 name, "
        "0x410A/0x410B/0x410D traffic light v2/v3/v4, 0x410C optional extents. MC2's "
        "<font face=Courier>losangeles.aib</font> uses 0x4107 and 0x410A and no 0x410C, and "
-       "loads unchanged as <font face=Courier>modcity_city.aib</font> (the one it replaced "
+       "loads unchanged as <font face=Courier>losangeles_city.aib</font> (the one it replaced "
        "was tokyo's, byte for byte)."),
 ]),
 

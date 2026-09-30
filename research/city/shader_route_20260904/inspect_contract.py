@@ -48,7 +48,7 @@ def source_palette_to_native(raw, count, scale=128):
     return bytes(out)
 
 def main():
-    compiled=TOOLS/'output/mc2_losangeles/compiled_ppf/modcity_midnight_clear'
+    compiled=TOOLS/'output/mc2_losangeles/compiled_ppf/losangeles_midnight_clear'
     manifest=json.loads(compiled.with_suffix('.manifest.json').read_text())
     ppf=compiled.with_suffix('.ppf').read_bytes()
     counts=collections.Counter()
