@@ -51,8 +51,8 @@ the finding behind the tool, and `python TOOL.py --help` lists its options.
 - The MC2 city modules (`city_mc2_rsc_draw_test`, `city_paris_slot7`,
   `losangeles_*`, `mc2_aib_compat`) share `mods/mc2_city_config.h` (per-city
   table for Los Angeles and Paris): copy it into `$MC3BOOT/mods/` next to the
-  module folders. They also need an mc3boot payload whose `mc3_heap.h` has
-  `mc3_heap_largest()`.
+  module folders. They need mc3boot from commit `a827b7f` (2026-09-30) or
+  later, for `mc3_heap_largest()` in `payload/mc3_heap.h`.
 - `audio/mc3_music_core.py` also needs Edness's `MclHash.py` and `strtbl.py`
   on the Python path; they are not redistributed here.
 - Optional external programs: PCSX2 (with PINE enabled for the live tools),
