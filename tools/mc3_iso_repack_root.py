@@ -97,7 +97,7 @@ def managed(name):
     base = name.split(';')[0]
     return (base.endswith('.MOD') or base in {
         'BANKS.DAT', 'ASSETS.DAT', 'MC3BOOT.ELF', 'MC3BOOT.INI',
-        'MC3MOD.BIN', 'LEIAME.TXT', 'README.TXT', 'SLUS_213.55M'
+        'MC3MOD.BIN', 'LEIAME.TXT', 'README.TXT', 'SLUS_213.55M', 'MC2.DAT'
     })
 
 
@@ -106,6 +106,8 @@ def main():
     ap.add_argument('iso')
     ap.add_argument('--staging', required=True)
     ap.add_argument('--apply', dest='apply_', action='store_true')
+    ap.add_argument('--first', action='append', default=[],
+                    help='write this staged file (8.3 name, e.g. MC2.DAT) before the others')
     ap.add_argument('--expand', dest='expand', action='store_true',
                     help='grow the ISO volume up to DVD5 if the new tail does not fit')
     args = ap.parse_args()
@@ -176,6 +178,9 @@ def main():
                 if rec_name(r) == 'SYSTEM.CNF;1' else r for r in keep]
 
         tail_files = [x for x in staged if x[0] != 'SYSTEM.CNF;1']
+        first = [f.upper() + ';1' for f in args.first]
+        tail_files.sort(key=lambda x: (x[0] not in first,
+                                       first.index(x[0]) if x[0] in first else 0))
         cursor = tail_start
         layout = []
         for name, path, size in tail_files:
@@ -255,6 +260,17 @@ def main():
         struct.pack_into('>I', root_sector, dot_len + 14, SECTOR)
         iso.seek(root_lba * SECTOR)
         iso.write(root_sector)
+
+        # The PVD's own copy of the root record (offset 156) carries the root
+        # size too, and the PS2 reads the directory by it: left at a retail
+        # 732 bytes, every entry past that offset vanished for anything that
+        # trusts the PVD (found on a clean dump).
+        iso.seek(PVD_LBA * SECTOR)
+        pvd_now = bytearray(iso.read(SECTOR))
+        struct.pack_into('<I', pvd_now, 166, SECTOR)
+        struct.pack_into('>I', pvd_now, 170, SECTOR)
+        iso.seek(PVD_LBA * SECTOR)
+        iso.write(pvd_now)
 
         if target_total != total:
             found_terminator = False

@@ -57,6 +57,7 @@ enum {
 
     RSC0 = 0x30435352,
     BND0 = 0x30444E42,
+    PMT0 = 0x30544D50,
     VBASE = 0x06800000,               // tokyo_bnd's base; ours too
     TOKYO_BODY = 0x000CB140,
     SKELETON = 0x330,
@@ -100,18 +101,26 @@ static mc3_u32 align16(mc3_u32 v) { return (v + 15u) & ~15u; }
 
 // ------------------------------------------------------------------ streams
 static int fail(mc3_u32 stage, mc3_u32 detail);
+// The MC2 files go through payload/mc2_dat.h: MC2's own ASSETS.DAT (MC2.DAT)
+// when installed, a raw range of the MC3 ASSETS.DAT from disc, or the loose
+// HostFS file. The donor tokyo_bnd stream is the game's and passes through.
+static void *md_alloc(mc3_u32 bytes) { return mc3_alloc(bytes); }
+static void md_free(void *p) { mc3_free(p); }
+static int md_room(mc3_u32 bytes) {
+    return mc3_heap_largest(mc3_heap_active()) >= bytes + HEAP_MARGIN;
+}
+#include "../../payload/mc2_dat.h"
 static __attribute__((noinline)) int seek_read(mc3_u32 h, mc3_u32 pos, void *dst, mc3_u32 n) {
-    if (MC3_CALL2(int, STREAM_SEEK, mc3_u32, int)(h, (int)pos) < 0) return 0;
+    if (md_seek(h, pos) < 0) return 0;
     mc3_u8 *p = (mc3_u8 *)dst;
     while (n) {
         const mc3_u32 k = n > CHUNK ? (mc3_u32)CHUNK : n;
-        if (MC3_CALL3(mc3_u32, STREAM_READ, mc3_u32, mc3_u32, mc3_u32)(h, (mc3_u32)p, k) != k)
-            return 0;
+        if (!md_read(h, p, k)) return 0;
         p += k; n -= k;
     }
     return 1;
 }
-static void close_stream(mc3_u32 h) { if (h) MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h); }
+static void close_stream(mc3_u32 h) { if (h) md_close(h); }
 
 // datAssetManager::Open(name, ext, 0, 1, 0x620000) - the call LoadBuild makes,
 // so tokyo_bnd is found wherever the game finds it (HostFS or disc).
@@ -496,13 +505,12 @@ static float parse_f(const char **pp) {
 }
 // Calls line(text, arg) for every line of a HostFS text file.
 static int each_line(const char *path, void (*line)(char *, char *), char *arg) {
-    const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(path, STREAM_RAW);
+    const mc3_u32 h = md_open(path);
     if (!h) return 0;
     char *b = G()->line;
     mc3_u32 have = 0;
     for (;;) {
-        const int got = MC3_CALL3(int, STREAM_READ, mc3_u32, void *, int)
-            (h, b + have, (int)(HOOD_CHUNK - have));
+        const int got = md_read_some(h, b + have, HOOD_CHUNK - have);
         if (got > 0) have += (mc3_u32)got;
         mc3_u32 start = 0;
         for (mc3_u32 i = 0; i < have; ++i) {
@@ -632,12 +640,40 @@ static int find_bnd0(Source *grid, Source *quad) {
     return 1;
 }
 
+// From MC2.DAT the rsc is deflated, and this build reads it at random (the
+// directory, every BND0 block, the PMT0 materials looked up from the cells):
+// a seek back would inflate the entry again from its start. So those ranges
+// are read once, forward, and kept (md_keep; ~1.9 MB for LA). Without room,
+// or for a plain file, reads go to the file as before.
+static void keep_rsc_ranges() {
+    mc3_u8 hdr[8] __attribute__((aligned(16)));
+    if (!seek_read(G()->rsc, 0, hdr, 8u) || rd32(hdr) != RSC0) return;
+    const mc3_u32 count = rd32(hdr + 4), size = (mc3_u32)md_size(G()->rsc);
+    if (!count || count > 0x10000u || 8u + 8u * count > size) return;
+    if (!md_room(8u * count + 64u)) return;
+    mc3_u8 *dir = (mc3_u8 *)mc3_alloc(8u * count + 16u);
+    if (!dir) return;
+    mc3_u32 from[MD_MAX_RANGES], to[MD_MAX_RANGES], n = 0;
+    if (seek_read(G()->rsc, 8u, dir, 8u * count)) {
+        from[n] = 0u; to[n++] = 8u + 8u * count;
+        for (mc3_u32 i = 0; i < count && n < MD_MAX_RANGES; ++i) {
+            const mc3_u32 type = rd32(dir + 8u * i + 4u);
+            if (type != BND0 && type != PMT0) continue;
+            from[n] = rd32(dir + 8u * i);
+            to[n++] = i + 1u < count ? rd32(dir + 8u * (i + 1u)) : size;
+        }
+        if (n < MD_MAX_RANGES) md_keep(G()->rsc, from, to, n);
+    }
+    mc3_free(dir);
+}
+
 static mc3_u32 build_body(mc3_u32 *out_size) {
     static const char tokyo_name[] = "$/resources/city/tokyo_bnd";
     const char *const rsc_path = mc2_city_rsc(current_city());
     if (!rsc_path) return fail(0x01, 0);
-    G()->rsc = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(rsc_path, STREAM_RAW);
+    G()->rsc = md_open(rsc_path);
     if (!G()->rsc) return fail(0x01, 0);
+    keep_rsc_ranges();
     G()->tokyo = open_asset(tokyo_name);
     if (!G()->tokyo) return fail(0x02, 0);
     mc3_u8 th[128] __attribute__((aligned(16)));
@@ -710,6 +746,7 @@ static mc3_u32 build_body(mc3_u32 *out_size) {
         write_box(G()->solid[i], body + verts9 + vb * 12u, body + polys9 + pb * 32u, vb);
     close_stream(G()->rsc); G()->rsc = 0;
     close_stream(G()->tokyo); G()->tokyo = 0;
+    md_release();
 
     // trees
     if (mc3_heap_largest(mc3_heap_active()) < scratch_bytes + 64u + HEAP_MARGIN)
@@ -773,6 +810,7 @@ extern "C" mc3_u32 bound_load_hook(mc3_u32 path, mc3_u32 type, mc3_u32 out1, mc3
         }
         close_stream(G()->rsc);
         close_stream(G()->tokyo);
+        md_release();
         if (G()->body) MC3_CALL1(void, ALIGNED_DELETE, mc3_u32)((mc3_u32)G()->body);
         mark('R','B','N','0', G()->err_stage, G()->err_detail);
     }

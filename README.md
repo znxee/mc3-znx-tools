@@ -51,8 +51,15 @@ the finding behind the tool, and `python TOOL.py --help` lists its options.
 - The MC2 city modules (`city_mc2_rsc_draw_test`, `city_paris_slot7`,
   `losangeles_*`, `mc2_aib_compat`) share `mods/mc2_city_config.h` (per-city
   table for Los Angeles and Paris): copy it into `$MC3BOOT/mods/` next to the
-  module folders. They need mc3boot from commit `a827b7f` (2026-09-30) or
-  later, for `mc3_heap_largest()` in `payload/mc3_heap.h`.
+  module folders. They need mc3boot from commit `193bf5a` (2026-10-01) or
+  later: `mc3_heap_largest()` in `payload/mc3_heap.h` and `payload/mc2_dat.h`.
+- The MC2 data those modules read (`mc2/<city>/...`) comes straight from
+  Midnight Club 2's own `ASSETS.DAT` (PS2, SLUS-20209), copied unchanged as
+  `MC2.DAT` into the HostFS root (`host0:MC2.DAT`) or a disc root
+  (`cdrom0:\MC2.DAT`); without it they read loose files from `mc2/`.
+  For a disc image, `tools/mc3_iso_repack_root.py` writes the root files
+  (MC2.DAT included) and `tools/mc3_iso_layer1.py` puts MC3 Remix's second
+  layer (the VIDEO folder) back behind the rebuilt first one.
 - `audio/mc3_music_core.py` also needs Edness's `MclHash.py` and `strtbl.py`
   on the Python path; they are not redistributed here.
 - Optional external programs: PCSX2 (with PINE enabled for the live tools),

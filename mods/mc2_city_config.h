@@ -20,14 +20,17 @@ static char mc2_city_instance_prefix(mc3_u32 city)
     return city == MC2_CITY_PARIS ? 'p' : 'l';
 }
 
+// MC2 data paths are relative: the active file backend resolves them - on
+// HostFS the raw layer prefixes "host0:" (Y:/MC3HostFS/mc2/...), booted from
+// disc the mounted ASSETS.DAT has them as entries "mc2/<city>/...".
 static __attribute__((noinline)) const char *mc2_la_root()
 {
-    static const char s[] = "host0:/mc2/losangeles/";
+    static const char s[] = "mc2/losangeles/";
     return s;
 }
 static __attribute__((noinline)) const char *mc2_paris_root()
 {
-    static const char s[] = "host0:/mc2/paris/";
+    static const char s[] = "mc2/paris/";
     return s;
 }
 static const char *mc2_city_root(mc3_u32 city)
@@ -38,12 +41,12 @@ static const char *mc2_city_root(mc3_u32 city)
 
 static __attribute__((noinline)) const char *mc2_la_rsc()
 {
-    static const char s[] = "host0:/mc2/losangeles/losangeles.rsc";
+    static const char s[] = "mc2/losangeles/losangeles.rsc";
     return s;
 }
 static __attribute__((noinline)) const char *mc2_paris_rsc()
 {
-    static const char s[] = "host0:/mc2/paris/paris.rsc";
+    static const char s[] = "mc2/paris/paris.rsc";
     return s;
 }
 static const char *mc2_city_rsc(mc3_u32 city)
@@ -54,12 +57,12 @@ static const char *mc2_city_rsc(mc3_u32 city)
 
 static __attribute__((noinline)) const char *mc2_la_rnt()
 {
-    static const char s[] = "host0:/mc2/losangeles/losangeles.rnt";
+    static const char s[] = "mc2/losangeles/losangeles.rnt";
     return s;
 }
 static __attribute__((noinline)) const char *mc2_paris_rnt()
 {
-    static const char s[] = "host0:/mc2/paris/paris.rnt";
+    static const char s[] = "mc2/paris/paris.rnt";
     return s;
 }
 static const char *mc2_city_rnt(mc3_u32 city)
@@ -70,12 +73,12 @@ static const char *mc2_city_rnt(mc3_u32 city)
 
 static __attribute__((noinline)) const char *mc2_la_city_dir()
 {
-    static const char s[] = "host0:/mc2/losangeles/city/";
+    static const char s[] = "mc2/losangeles/city/";
     return s;
 }
 static __attribute__((noinline)) const char *mc2_paris_city_dir()
 {
-    static const char s[] = "host0:/mc2/paris/city/";
+    static const char s[] = "mc2/paris/city/";
     return s;
 }
 static const char *mc2_city_dir(mc3_u32 city)

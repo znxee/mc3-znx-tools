@@ -90,7 +90,7 @@ zero as it is for Los Angeles.
 `[boot] mc2s = N` (diagnostic): the camera chases the AI opponents, N seconds
 each, instead of the player - whole races can run unattended and be
 photographed along every route. Same technique as the Orbit mode of
-AlgumCorrupto's freecam (CinematicClub,
+AlgumCorrupto's freecam (CinematicClub, C:/MC3test/CinematicClub-old_ver/
 FreeCam/OpponentCam.cpp): every car is an instance with vtable 0x00627630,
 Matrix34 at +0x10; the player's own (*(player+20)+0x18) is skipped. The heap is
 scanned for them when the list is empty, stale or at each switch. Look-at from
@@ -511,6 +511,29 @@ at the point facing its velocity and thrown once, the game's camera left
 alone. Boot keys renamed: particles `mc2f` (was mc2x), sky `mc2b` (was
 mc2y) - mc2x/mc2y/mc2z together already place the camera.
 
+### Leaving a race: trains and the front end's city (2026-10-01)
+
+Two crashes and the empty city behind the menus, all on leaving LA/Paris:
+- "Next race" in the Arcade and entering a city after the front end jumped
+  to 0xCDCDCDCD in aiAmbientTrafficData's destructor (mcLayerAmbients::
+  Unload): the train manager's Release (0x22F2C8) walks the train array by
+  the count in its allocation header (16 bytes before the pointer), not by
+  the atArray count `mc3_traffic_trains.py --remove` had zeroed, and called
+  the virtual destructor of never-constructed trains. The tool now clears
+  the manager's first seven words like Atlanta's (no train), and the LA and
+  Paris traffic packs were re-made that way.
+- frontend_hook set BOTH race configs to San Diego, which told
+  EnterStateMC3Frontend nothing changed: Los Angeles stayed loaded behind
+  the menus (an empty pack without this renderer). Now only the NEXT config
+  becomes San Diego, so the front end reloads it (checked through the menus:
+  Paris race -> menus with San Diego behind -> race again). With
+  `[boot] nofe = 1` the old way is kept: booted straight into the race, this
+  module sits right above the city in the heap and San Diego's 8.9 MB do not
+  fit in the hole the city leaves ("Heap (null) overrun").
+Found on the way, NOT from these mods (same without this renderer):
+quitting a Detroit race to the front end reloads Detroit with 80 texture
+pages and debug_memory_fill writes past the end of RAM (0x2000000).
+
 ### VU bootstrap built at run time
 
 The microcode is MC3's own: `rv1_code_main` (EE 0x610A68, three 2048-byte
@@ -896,3 +919,78 @@ strip is fixed here (RCTX v2 + MC3 ring, above) but NOT in the tiled
 addresses. Unverified on hardware: the VIF `DIRECT` data in every VCLQ packet
 of this module (as in v1) starts 8 bytes into a quadword, which PCSX2 accepts. For the latest CPVS/native-depth status and
 test configuration, see `city_mc2_scene/README.md`.
+
+### LAN Return to Lobby and the menu camera (2026-10-01)
+
+Reloading San Diego after Los Angeles in a LAN session does not fit:
+mcPropManager::Load asks 2,260,096 bytes and the largest free block is
+2,211,936 ("Heap (null) overrun"). The game itself never reloads the city on
+Return to Lobby, so in LAN (netManager 0x619D5C +16 == 0) `frontend_hook`
+leaves both race configs and this renderer alone (marker `RFEL <city> <blocks>`).
+
+Menu screens keep their camera per city in two Vector3[4] (+152 look-at,
++200 target, from "<city> Look at"/"<city> Target" in tune/ui/<lang>/*.ui)
+and pass &v[city] to mc3FeView::RequestTransition (0x322518). `fe_transition`
+hooks all 19 calls: for a city >= 4 it uses `[boot] felk` / `fetg` = `x,y,z`
+when given, otherwise the screen's San Diego entry. The MoveFECamera guard
+(0x3396C0, `slti $v0, $s1, 4`) is opened to 16 at run time.
+The front-end UI is a panel at a fixed place in the world, so the camera has
+to face it: Los Angeles has a built-in camera (`fe_camera_builtin`, target
+681.507,11.760,484.131, look-at 685.165,10.630,484.261 - found by moving the
+camera in the lobby); the lobby shows over it. "Target" is where the camera
+sits (mc3FeView +1628), "Look at" the point it faces (+1616). Paris has none
+yet (San Diego entry).
+
+### Disc build: relative MC2 paths and pcul (2026-10-01)
+
+The MC2 data paths in payload/mc2_city_config.h and `phys_dir` are relative
+(`mc2/<city>/...`, `mc2/tune/phys/`). Stream::Open(path, true) goes to the
+active file backend: on HostFS the raw layer (_coreRawOpenFile) prefixes
+"host0:" ($MC3_HOSTFS/mc2/...); booted from disc the mounted ASSETS.DAT
+(zipFile::Locate, exact name) holds them as entries `mc2/...`. Diagnostic
+files (pins, drop test, camera tour) stay on host0:.
+
+`[boot] pcul` (ported from the C++ fork's city_mc2_rsc_draw_perf): screen-size
+cull in fr_visible, a sphere whose radius is under pcul/1000 of its distance
+is skipped. 0/absent = off; the disc ini uses mc2r 600 + pcul 20.
+
+### Loading from the disc (2026-10-01)
+
+Booted from disc, zipHandle::Read cuts every stored ASSETS.DAT entry into
+2048-byte pieces, one CDVD command each (~150-250 KB/s): LA's MC2 data took
+~90 s from the ISO. `stream_open` looks the entry up with zipFile::Locate
+(+4 offset, +8 size, +12 stored size) and, for a stored entry, opens
+`cdrom0:\ASSETS.DAT;1` through the raw layer as a range (`stream_size`,
+`stream_seek`, `stream_close` keep the offset); a large read there is one
+command. The ambients .rsc (random reads, 2.3 MB) is read whole when the heap
+has room (`stream_slurp`); .rsc/CPVS gaps over 2 KB are seeked, not read;
+hood text reads are 32 KB. Same markers, ISO times RSCS->RPRP: LA 90 -> 22 s,
+Paris 91 -> 23 s. HostFS takes the old path (the zip backend is not active).
+A sequential 128 KB read-ahead through the zip layer was tried and was slower.
+
+### MC2 data from MC2's own ASSETS.DAT (2026-10-01)
+
+payload/mc2_dat.h (shared with losangeles_bound) opens the mc2/ paths from
+MC2's ASSETS.DAT copied unchanged as MC2.DAT (cdrom0:\MC2.DAT;1 from disc,
+host0:MC2.DAT on HostFS): the Dave directory is read once and only
+resource/{losangeles,paris}/, city/{losangeles,paris}/ and tune/phys/ are
+indexed (FNV-1a, 1217 entries); 571 of the 584 files are raw deflate and are
+inflated forward with the game's zlib 1.1.3 (inflateInit2 0x4FB4B0 with -15
+and a 72-byte z_stream, inflate 0x4FB5F8, inflateReset 0x4FB3E0, inflateEnd
+0x4FB440). A forward seek inflates and drops, a backward one restarts the
+entry; the ambients are slurped; losangeles_bound keeps the directory, BND0
+and PMT0 ranges of the city .rsc (md_keep, one pass). Without MC2.DAT the
+previous paths apply (raw range of the MC3 ASSETS.DAT on disc, loose files on
+HostFS). Same markers from MC2.DAT on HostFS; RSCS->RPRP ~14 s.
+
+### Front end over the empty city (2026-10-01)
+
+Leaving Los Angeles or Paris for the front end (Arcade "Go to Menus", LAN
+"Return to Lobby", any mode) keeps that city loaded with both race configs
+untouched - EnterStateMC3Frontend reloads nothing - and releases this
+renderer, so the menus sit over the empty city. The front-end panel is at
+the same world spot in both cities; fe_camera_builtin (cities 5 and 6) is the
+camera the user placed: target 684.362,8.108,483.404, look-at
+688.185,8.290,483.542. Marker RFEE <city> <blocks>. `[boot] fesd = 1` restores
+the San Diego fallback (which overran the heap in LAN). Tested: Arcade LA ->
+menus -> Paris race; LAN LA -> lobby -> second race.

@@ -45,7 +45,7 @@ KEYS = {
 }
 RAW = {str(d): (0x30 + d, False) for d in range(10)}
 RAW.update({'backspace': (0x08, False), 'enter': (0x0D, False), 'shift': (0x10, False),
-            'ctrl': (0x11, False), 'alt': (0x12, False), 'f9': (0x78, False), 'tab': (0x09, False)})   # ctrl+alt+f9 = video capture
+            'ctrl': (0x11, False), 'alt': (0x12, False), 'f1': (0x70, False), 'f2': (0x71, False), 'f9': (0x78, False), 'tab': (0x09, False), 'space': (0x20, False)})   # ctrl+alt+f9 = video capture
 PAD_NAMES = {'up': 'Up', 'down': 'Down', 'left': 'Left', 'right': 'Right',
              'cross': 'Cross', 'circle': 'Circle', 'square': 'Square',
              'triangle': 'Triangle', 'start': 'Start', 'select': 'Select',
@@ -84,6 +84,9 @@ def main():
     ap.add_argument('--elf', default=os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'mc3boot.elf'))
     ap.add_argument('--out', required=True)
     ap.add_argument('--statefile', help='start from this .p2s instead of booting (pcsx2 -statefile)')
+    ap.add_argument('--iso', help='boot this disc image instead of --elf')
+    ap.add_argument('--no-hostfs', action='store_true',
+                    help='HostFs = false for this run (a disc test: mc3boot reads host0: first)')
     ap.add_argument('steps', nargs='+')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -93,11 +96,14 @@ def main():
     p = None
     try:
         text = open(INI, encoding='utf-8').read()
-        open(INI, 'w', encoding='utf-8').write(add_keyboard(text))
+        text = add_keyboard(text)
+        if a.no_hostfs:
+            text = text.replace('HostFs = true', 'HostFs = false')
+        open(INI, 'w', encoding='utf-8').write(text)
         cmd = [S.PCSX2, '-batch', '-nogui', '-logfile', S.LOG]
         if a.statefile:
             cmd += ['-statefile', a.statefile]
-        cmd += ['--', a.elf]
+        cmd += ['--', a.iso or a.elf]
         p = subprocess.Popen(cmd,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         t0 = time.time()

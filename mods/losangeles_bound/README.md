@@ -86,8 +86,8 @@ This is MC2's native collision. It does not carry what Fork City COLLISION
 added to `losangeles_bnd.pck` (v18-v21: instance asphalt at crossings, curbs,
 its own type-10 ground plane). MC2's own answer for road surfaces is the
 `losangeles_quad_0` quadtree, which is now used as type 10. To go back: set
-`losangeles_bound.mod = 0` and install a `losangeles_bnd.pck` built by
-`tools/mc2_bnd_to_mc3.py`.
+`losangeles_bound.mod = 0` and restore `losangeles_bnd.pck` from
+`$MC3_WORK/backups/Fork City MODS/2026-09-26_bound_from_rsc/before/`.
 
 ## Freeway pillars (2026-09-27)
 

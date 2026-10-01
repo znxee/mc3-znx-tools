@@ -80,7 +80,7 @@ enum {
     INST_HASH = 16384,
     MAX_HOODS = 32,
     MAX_COMP_PCP = 512,
-    HOOD_CHUNK = 4096,
+    HOOD_CHUNK = 32768,         // was 4096: from the disc every read is one CDVD command
     HOOD_CHUNKS_PER_FRAME = 16,
     STREAM_SEEK = 0x003996C0,
     MAX_PROP_TYPES = 128,
@@ -280,7 +280,7 @@ struct State {
     mc3_u32 cyc_sum, cyc_max, cyc_frames;                // set_camera_hook cost (RCYC)
     mc3_u32 cyc_phys, cyc_fx, cyc_lights, cyc_draw;      // its parts (RCY2, in K cycles)
     mc3_u32 prof[5];
-    float fr[24] __attribute__((aligned(16)));           // frustum_update: eye, radius, 5 planes
+    float fr[28] __attribute__((aligned(16)));           // frustum_update: eye, radius, 5 planes, size cull
     mc3_u32 fr_ok;                                     // draw_city: setup/sky, components, instances, props, reflect (RCY3/4)
 };
 // State lives on the heap, taken when a race in an MC2 city starts
@@ -338,10 +338,22 @@ static mc3_u32 le32(const mc3_u8 *p) {
     return (mc3_u32)p[0] | ((mc3_u32)p[1] << 8) |
            ((mc3_u32)p[2] << 16) | ((mc3_u32)p[3] << 24);
 }
-static int read_exact(mc3_u32 h, void *p, mc3_u32 n) {
-    return MC3_CALL3(mc3_u32, STREAM_READ, mc3_u32, mc3_u32, mc3_u32)
-        (h, (mc3_u32)p, n) == n;
-}
+static int read_exact(mc3_u32 h, void *p, mc3_u32 n);
+
+// Every MC2 file goes through payload/mc2_dat.h: MC2's own ASSETS.DAT
+// (MC2.DAT) when the install has it, a stored entry of the MC3 ASSETS.DAT as
+// a raw disc range otherwise (booted from disc), or the loose HostFS file.
+static int heap_room(mc3_u32 bytes);
+static void *md_alloc(mc3_u32 bytes) { return r_alloc(bytes); }
+static void md_free(void *p) { r_free(p); }
+static int md_room(mc3_u32 bytes) { return heap_room(bytes); }
+#include "../../payload/mc2_dat.h"
+static mc3_u32 stream_open(const char *path) { return md_open(path); }
+static int stream_size(mc3_u32 h) { return md_size(h); }
+static void stream_close(mc3_u32 h) { md_close(h); }
+static void stream_slurp(mc3_u32 h) { md_slurp(h); }
+static int read_exact(mc3_u32 h, void *p, mc3_u32 n) { return md_read(h, p, n); }
+static void region_reset() { md_forget(); }
 static void fail(Piece *p, mc3_u32 code) { p->error = code; }
 static mc3_u32 word(mc3_u32 p) { return *(volatile mc3_u32 *)p; }
 static float fword(const mc3_u32 *p) {
@@ -684,6 +696,19 @@ static int outside_plane(float a, float b, float c, float d,
 // The VU uses row vectors: clip.x = x*m[0] + y*m[4] + z*m[8] + m[12], so the
 // planes come from matrix columns, not contiguous rows (using rows rejected
 // visible models as the camera rotated). Z is left to the GS.
+// [boot] pcul (from the C++ fork's city_mc2_rsc_draw_perf): screen-size cull,
+// in thousandths of radius per unit of distance - pcul = 20 skips a sphere
+// whose radius is under 2% of its distance (8 m at 400 m). Small far pieces
+// cost as much VU/GS work as near ones for a few pixels; large buildings stay.
+// Measured there: mc2r 600 + pcul 20 = 54 fps with the 600 look. 0/absent = off.
+static float size_cull2() {
+    const char *v = mc3_bootarg(MC3_ID('p','c','u','l'));
+    mc3_u32 n = 0;
+    while (v && *v >= '0' && *v <= '9') n = n * 10u + (mc3_u32)(*v++ - '0');
+    if (!n || n > 500u) return ffrom(0u);
+    const float k = (float)(int)n * ffrom(0x3A83126Fu);     // * 0.001
+    return k * k;
+}
 static void frustum_update() {
     State *s = st();
     s->fr_ok = 0u;
@@ -694,6 +719,7 @@ static void frustum_update() {
     f[1] = fword((const mc3_u32 *)(camera + 40u));
     f[2] = fword((const mc3_u32 *)(camera + 44u));
     f[3] = draw_radius();
+    f[24] = size_cull2();
     const mc3_u32 *vp = (const mc3_u32 *)(s->bootstrap + s->matrix_offset);
     const float wx = fword(vp + 3), wy = fword(vp + 7), wz = fword(vp + 11), w0 = fword(vp + 15);
     const float xx = fword(vp + 0), xy = fword(vp + 4), xz = fword(vp + 8), x0 = fword(vp + 12);
@@ -718,7 +744,9 @@ static void frustum_update() {
 static inline int fr_visible(const float *f, float x, float y, float z, float radius) {
     const float dx = x - f[0], dy = y - f[1], dz = z - f[2];
     const float limit = f[3] + radius;
-    if (dx * dx + dy * dy + dz * dz > limit * limit) return 0;
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > limit * limit) return 0;
+    if (radius * radius < f[24] * d2) return 0;
     for (int k = 0; k < 5; ++k) {
         const float *q = f + 4 + k * 4;
         if (q[0] * x + q[1] * y + q[2] * z + q[3] < -radius) return 0;
@@ -745,11 +773,12 @@ static int instance_visible(const mc3_u32 *record) {
 }
 
 static int consume_to(mc3_u32 limit, mc3_u32 budget);
+static __attribute__((noinline)) int stream_seek(mc3_u32 h, mc3_u32 pos);
 static int plan_rsc_textures();
 
 static void close_rsc_stream(State *s) {
     if (s->rsc_stream)
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->rsc_stream);
+        stream_close(s->rsc_stream);
     r_free((void *)s->rsc_table_mem);
     r_free((void *)s->rsc_scratch_mem);
     s->rsc_stream = 0;
@@ -761,15 +790,14 @@ static int open_rsc_stream() {
     State *s = st();
     const char *const path = mc2_city_rsc(active_city());
     if (!path) { s->rsc_error = 1; s->rsc_state = 3; return 0; }
-    const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)
-        (path, STREAM_RAW);
+    const mc3_u32 h = stream_open(path);
     if (!h) { s->rsc_error = 1; s->rsc_state = 3; return 0; }
-    const int signed_size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
+    const int signed_size = stream_size(h);
     mc3_u8 header[8] __attribute__((aligned(16)));
     if (signed_size < 8 || !read_exact(h, header, sizeof(header)) ||
         le32(header) != RSC0) {
         s->rsc_error = 2;
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+        stream_close(h);
         s->rsc_state = 3;
         return 0;
     }
@@ -778,7 +806,7 @@ static int open_rsc_stream() {
     if (!count || count > MAX_RSC_ENTRIES || table_bytes > DIRECTORY_MAX ||
         table_bytes > (mc3_u32)signed_size - 8u) {
         s->rsc_error = 3;
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+        stream_close(h);
         s->rsc_state = 3;
         return 0;
     }
@@ -786,7 +814,7 @@ static int open_rsc_stream() {
     mc3_u8 *scratch_mem = (mc3_u8 *)r_alloc(2048u + 16u);
     if (!table_mem || !scratch_mem) {
         s->rsc_error = 4;
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+        stream_close(h);
         r_free(table_mem);
         r_free(scratch_mem);
         s->rsc_state = 3;
@@ -796,7 +824,7 @@ static int open_rsc_stream() {
     const mc3_u32 scratch = ((mc3_u32)scratch_mem + 15u) & ~15u;
     if (!read_exact(h, (void *)table, table_bytes)) {
         s->rsc_error = 5;
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+        stream_close(h);
         r_free(table_mem);
         r_free(scratch_mem);
         s->rsc_state = 3;
@@ -1405,13 +1433,19 @@ static int consume_to(mc3_u32 limit, mc3_u32 budget) {
             ++s->tex_next;
         const mc3_u32 e = s->tex_next;
         const mc3_u32 at = e < s->rsc_count ? le32(table + e * 8u) : s->rsc_size;
-        if (at > s->rsc_cursor) {                      // plain gap
-            mc3_u32 n = (at < limit ? at : limit) - s->rsc_cursor;
-            if (n > 2048u) n = 2048u;
+        if (at > s->rsc_cursor) {                      // plain gap: skipped, not read
+            // Seek, never read: the game's Stream buffers 2 KB, so reading a
+            // gap was one disc command per 2 KB thrown away - from the ISO,
+            // 45 s of LA's 9 MB .rsc (HostFS hides it). A seek costs nothing.
+            // (A gap of 2 KB or less is usually still in that buffer, which
+            // a seek would drop, so those are read.)
+            const mc3_u32 to = at < limit ? at : limit;
             if (!budget) return 0;
-            if (n > budget) n = budget;
-            if (!read_exact(s->rsc_stream, scratch, n)) return -1;
-            s->rsc_cursor += n; budget -= n;
+            if (to - s->rsc_cursor <= 2048u) {
+                if (!read_exact(s->rsc_stream, scratch, to - s->rsc_cursor)) return -1;
+            } else if (stream_seek(s->rsc_stream, to) < 0) return -1;
+            budget = budget > 2048u ? budget - 2048u : 0u;
+            s->rsc_cursor = to;
             continue;
         }
         const mc3_u32 end = e + 1u < s->rsc_count ? le32(table + (e + 1u) * 8u) : s->rsc_size;
@@ -1474,15 +1508,14 @@ static void step_shared_textures() {
         path[n++] = '_'; path[n] = 0;
         n = append(path, n, cond_weather());
         append(path, n, rsc_suffix());
-        const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)
-            (path, STREAM_RAW);
+        const mc3_u32 h = stream_open(path);
         if (!h) { s->texture_error = 6u; s->shared_state = 3u; return; }
-        const int size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
+        const int size = stream_size(h);
         mc3_u8 *mem = size > 16 && size <= 0x200000 && heap_room((mc3_u32)size + 16u)
             ? (mc3_u8 *)r_alloc((mc3_u32)size + 16u) : 0;
         if (!mem) {
             s->texture_error = 7u;
-            MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+            stream_close(h);
             s->shared_state = 3u;
             return;
         }
@@ -1499,7 +1532,7 @@ static void step_shared_textures() {
     const int ok = read_exact(s->shared_stream, (void *)(s->shared + s->shared_done), part);
     if (ok) s->shared_done += part;
     if (ok && s->shared_done < s->shared_bytes) return;
-    MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->shared_stream);
+    stream_close(s->shared_stream);
     s->shared_stream = 0u;
     const mc3_u32 count = ok ? word(s->shared + 4u) : 0u;
     int valid = ok && word(s->shared) == RSC0 && count && count < 4096u &&
@@ -1562,13 +1595,13 @@ static void step_sky() {
         path[n++] = '_'; path[n] = 0;
         n = append(path, n, cond_weather());
         append(path, n, rsc_suffix());
-        const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(path, STREAM_RAW);
+        const mc3_u32 h = stream_open(path);
         if (!h) { s->sky_state = 9u; mark('R','S','K','E', 1u, 0u); return; }
-        const int size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
+        const int size = stream_size(h);
         mc3_u8 *mem = size > 16 && size <= 0x80000 && heap_room((mc3_u32)size + 16u)
             ? (mc3_u8 *)r_alloc((mc3_u32)size + 16u) : 0;
         if (!mem) {
-            MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+            stream_close(h);
             s->sky_state = 9u; mark('R','S','K','E', 2u, (mc3_u32)size); return;
         }
         s->sky_stream = h;
@@ -1584,7 +1617,7 @@ static void step_sky() {
     const int ok = read_exact(s->sky_stream, (void *)(s->sky + s->sky_done), part);
     if (ok) s->sky_done += part;
     if (ok && s->sky_done < s->sky_bytes) return;
-    MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->sky_stream);
+    stream_close(s->sky_stream);
     s->sky_stream = 0u;
     const mc3_u32 count = ok ? word(s->sky + 4u) : 0u;
     int valid = ok && word(s->sky) == RSC0 && count && count < 256u && 8u + count * 8u <= s->sky_bytes;
@@ -1677,14 +1710,14 @@ static mc3_u32 find_model(const char *p, mc3_u32 n) {
 }
 
 static __attribute__((noinline)) int stream_seek(mc3_u32 h, mc3_u32 pos) {
-    return MC3_CALL2(int, STREAM_SEEK, mc3_u32, int)(h, (int)pos);
+    return md_seek(h, pos);
 }
 
 // Whole small file into the heap (16-aligned, NUL after the end).
 static mc3_u32 read_whole(const char *path, mc3_u32 max, mc3_u32 *bytes, mc3_u32 *mem) {
-    const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(path, STREAM_RAW);
+    const mc3_u32 h = stream_open(path);
     if (!h) return 0u;
-    const int size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
+    const int size = stream_size(h);
     mc3_u8 *m = size > 0 && (mc3_u32)size <= max && heap_room((mc3_u32)size + 32u)
         ? (mc3_u8 *)r_alloc((mc3_u32)size + 32u) : 0;
     mc3_u32 base = 0u;
@@ -1693,7 +1726,7 @@ static mc3_u32 read_whole(const char *path, mc3_u32 max, mc3_u32 *bytes, mc3_u32
         if (read_exact(h, (void *)base, (mc3_u32)size)) ((mc3_u8 *)base)[size] = 0;
         else { r_free(m); m = 0; base = 0u; }
     }
-    MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+    stream_close(h);
     *bytes = m ? (mc3_u32)size : 0u;
     *mem = (mc3_u32)m;
     return base;
@@ -1936,11 +1969,11 @@ static int hood_open(const char *name, const char *suffix) {
     int n = append(path, 0, city_folder());
     n = append(path, n, name);
     append(path, n, suffix);
-    const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(path, STREAM_RAW);
+    const mc3_u32 h = stream_open(path);
     if (!h) return 0;
     Hood *hd = &s->hood;
     hd->stream = h;
-    hd->size = (mc3_u32)MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
+    hd->size = (mc3_u32)stream_size(h);
     hd->pos = 0; hd->fill = 0; hd->in_inst = 0;
     return 1;
 }
@@ -1968,7 +2001,7 @@ static void step_hoods() {
     if (s->hood_state == 1u) {                          // the .lvl
         const int r = hood_pump(1);
         if (r == 0) return;
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(hd->stream);
+        stream_close(hd->stream);
         hd->stream = 0;                          // closing twice jumps to 0
         if (r < 0 || !s->hood_count) { s->instances_error = 2u; s->hood_state = 9u; return; }
         s->hood_index = 0;
@@ -1983,7 +2016,7 @@ static void step_hoods() {
         }
         const int r = hood_pump(0);
         if (r == 0) return;
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(hd->stream);
+        stream_close(hd->stream);
         hd->stream = 0;
         if (r < 0) { s->instances_error = 5u; s->hood_state = 9u; return; }
         ++s->hood_index;
@@ -2311,10 +2344,10 @@ static mc3_u32 load_mod(mc3_u32 handle, mc3_u32 *addr, mc3_u16 *qwc, mc3_u16 *sl
 
 // The template's PRP0 (by name in the ambients .rnt) and its MOD0s.
 
-// MC2's physics tuning of a prop: host0:/mc2/tune/phys/<name>.phys (copied by
+// MC2's physics tuning of a prop: mc2/tune/phys/<name>.phys (copied by
 // the installer from assets/tune/phys). Only `mass:` is used - everything in
 // LA's set is type BREAK; 1000 kg and up (parked car, containers) stays put.
-static __attribute__((noinline)) const char *phys_dir() { static const char s[] = "host0:/mc2/tune/phys/"; return s; }
+static __attribute__((noinline)) const char *phys_dir() { static const char s[] = "mc2/tune/phys/"; return s; }
 static __attribute__((noinline)) const char *phys_ext() { static const char s[] = ".phys"; return s; }
 static __attribute__((noinline)) const char *kw_mass() { static const char s[] = "mass:"; return s; }
 static mc3_u32 read_whole(const char *path, mc3_u32 max, mc3_u32 *bytes, mc3_u32 *mem);
@@ -2588,10 +2621,11 @@ static void step_props() {
         s->amb_rnt_bytes = bytes;
         if (!s->amb_rnt || word(s->amb_rnt) != RNT0) { s->prop_error = 1u; s->prop_state = 9u; return; }
         append(path, stem, rsc_suffix());
-        const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(path, STREAM_RAW);
+        const mc3_u32 h = stream_open(path);
         if (!h) { s->prop_error = 2u; s->prop_state = 9u; return; }
+        stream_slurp(h);
         mc3_u8 head[16] __attribute__((aligned(16)));
-        const int size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
+        const int size = stream_size(h);
         const mc3_u32 count = read_exact(h, head, 8u) && le32(head) == RSC0 ? le32(head + 4u) : 0u;
         const mc3_u32 need = count * 8u + count * 4u + count * 2u + MAX_PROPS * 84u + 256u;
         mc3_u8 *tab = count && count <= MAX_AMB_ENTRIES && heap_room(need)
@@ -2599,10 +2633,10 @@ static void step_props() {
         mc3_u8 *recs = tab ? (mc3_u8 *)r_alloc(MAX_PROPS * 20u + 16u) : 0;
         mc3_u8 *mats = recs ? (mc3_u8 *)r_alloc(MAX_PROPS * 64u + 16u) : 0;
         mc3_u8 *buf = mats ? (mc3_u8 *)r_alloc(HOOD_CHUNK + 512u) : 0;
-        if (!buf) { MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h); s->prop_error = 3u; s->prop_state = 9u; return; }
+        if (!buf) { stream_close(h); s->prop_error = 3u; s->prop_state = 9u; return; }
         const mc3_u32 tb = ((mc3_u32)tab + 15u) & ~15u;
         if (!read_exact(h, (void *)tb, count * 8u)) {
-            MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h); s->prop_error = 4u; s->prop_state = 9u; return;
+            stream_close(h); s->prop_error = 4u; s->prop_state = 9u; return;
         }
         s->amb_stream = h;
         s->amb_count = count;
@@ -2628,9 +2662,9 @@ static void step_props() {
     if (s->prop_state == 1u) {
         const int r = hood_pump(2);
         if (r == 0) return;
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(hd->stream);
+        stream_close(hd->stream);
         hd->stream = 0;
-        MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->amb_stream);
+        stream_close(s->amb_stream);
         s->amb_stream = 0;
         r_free((void *)hd->buf_mem);
         hd->buf_mem = 0;
@@ -3127,12 +3161,29 @@ static void lights_release() {
     }
     s->light_count = 0u;
 }
-// Leaving the city: no particle may point at our rules any more.
+// Leaving the city: no particle may point at our rules any more, and what
+// the rules took from the GAME heap goes back. swPtxBirth::SetTexture
+// (ComputeTextureCoordinates 0x1EFB40) allocates each rule's 8x8 UV table
+// with vec_new (1 KB, +332): 16 of them stayed behind every visit, scattered
+// through the heap, and one sat between the two largest free blocks when the
+// LAN lobby went back to San Diego - its props pack (2.26 MB) no longer fit
+// ("Heap (null) overrun", the lobby never came up; player's savestate 09).
+// The rule's own destructor (0x390048 -> swPtxBirth -> parFileIO, flag 0:
+// the object is our memory) frees that table; it would also vec_delete the
+// name at +4, which is our static string, so that is cleared first.
+enum { BIRTH_RULE_DTOR = 0x00390048 };
 static void fx_release() {
     State *s = st();
     if (!s || !s->fx_mem) return;
     const mc3_u32 sys = word(PROP_PTX_SYSTEM);
     if (ptr(sys) && sys == s->fx_sys) MC3_CALL1(void, PTX_RESET, mc3_u32)(sys);
+    for (mc3_u32 k = 0; k < FX_RULE_COUNT; ++k) {
+        const mc3_u32 r = s->fx_rules[k];
+        if (!r) continue;
+        put_u32(r + 4u, 0u);
+        MC3_CALL2(void, BIRTH_RULE_DTOR, mc3_u32, int)(r, 0);
+        s->fx_rules[k] = 0u;
+    }
     s->fx_mem = 0u;
 }
 static void hit_prop(mc3_u32 i, float *car_vel, float speed) {
@@ -3390,10 +3441,9 @@ static void step_cpvs() {
         path[n++] = '_'; path[n] = 0;
         n = append(path, n, cond_weather());
         append(path, n, cpvs_suffix());
-        const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)
-            (path, STREAM_RAW);
+        const mc3_u32 h = stream_open(path);
         if (!h) { s->cpvs_error = 1u; s->cpvs_state = 3u; return; }
-        const int size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
+        const int size = stream_size(h);
         mc3_u8 header[16] __attribute__((aligned(16)));
         const mc3_u32 count = size > 16 && size <= (int)CPVS_MAX &&
             read_exact(h, header, 8u) && le32(header) == RSC0 ? le32(header + 4u) : 0u;
@@ -3403,7 +3453,7 @@ static void step_cpvs() {
         if (!table) {
             s->cpvs_error = count ? 3u : 2u;
             s->cpvs_bytes = (mc3_u32)size;
-            MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+            stream_close(h);
             s->cpvs_state = 3u;
             return;
         }
@@ -3459,7 +3509,7 @@ static void step_cpvs() {
         if (!mem) {
             if (!s->cpvs_error) s->cpvs_error = 7u;
             s->cpvs_bytes = kept;
-            MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->cpvs_stream);
+            stream_close(s->cpvs_stream);
             s->cpvs_stream = 0u;
             s->cpvs_state = 3u;
             return;
@@ -3481,12 +3531,13 @@ static void step_cpvs() {
         if (!(v & 0x80000000u)) { ++s->cpvs_index; continue; }
         const mc3_u32 off = (v & 0x3FFFFu) << 4;
         const mc3_u32 len = ((v >> 18) & 0x1FFFu) << 4;
-        if (s->cpvs_pos < off) {
-            mc3_u32 gap = off - s->cpvs_pos;
-            if (gap > 2048u) gap = 2048u;
-            if (!read_exact(s->cpvs_stream, scratch, gap)) { s->cpvs_error = 8u; break; }
-            s->cpvs_pos += gap;
-            budget = budget > gap ? budget - gap : 0u;
+        if (s->cpvs_pos < off) {                       // skipped entries: seek (see consume_to)
+            const int ok = off - s->cpvs_pos <= 2048u
+                ? read_exact(s->cpvs_stream, scratch, off - s->cpvs_pos)
+                : stream_seek(s->cpvs_stream, off) >= 0;
+            if (!ok) { s->cpvs_error = 8u; break; }
+            s->cpvs_pos = off;
+            budget = budget > 2048u ? budget - 2048u : 0u;
             continue;
         }
         if (s->cpvs_pos != off || s->cpvs_fill + len > s->cpvs_kept ||
@@ -3501,7 +3552,7 @@ static void step_cpvs() {
         ++s->cpvs_index;
     }
     if (!s->cpvs_error && s->cpvs_index < s->cpvs_count) return;
-    MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->cpvs_stream);
+    stream_close(s->cpvs_stream);
     s->cpvs_stream = 0u;
     if (s->cpvs_error || s->cpvs_fill != s->cpvs_kept) {
         if (!s->cpvs_error) s->cpvs_error = 10u;
@@ -3669,11 +3720,12 @@ static void release_all() {
         const mc3_u32 streams[5] = { s->rsc_stream, s->shared_stream, s->amb_stream,
                                      s->cpvs_stream, s->hood.stream };
         for (int i = 0; i < 5; ++i)
-            if (streams[i]) MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(streams[i]);
+            if (streams[i]) stream_close(streams[i]);
     }
     Tracked *t = trk();
     const mc3_u32 blocks = t->n;
     while (t->n) mc3_free((void *)t->ptr[--t->n]);
+    region_reset();
     if (*state_mem_slot()) {
         mc3_free((void *)*state_mem_slot());
         *state_mem_slot() = 0u;
@@ -4380,7 +4432,7 @@ static void pins_save() {
         line[n++] = '\n';
         MC3_CALL3(int, STREAM_WRITE, mc3_u32, const void *, int)(h, line, n);
     }
-    MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+    stream_close(h);
     s->pin_saved = s->pin_count;
 }
 // The pins of earlier sessions: host0:/mc2_pins.txt as pins_save writes it.
@@ -5053,27 +5105,188 @@ MC3_HOOK(SET_CAMERA_HOOK, set_camera_hook);
 //  - the background city: the game reloads the LAST race's city and aims the
 //    menu camera at its entry in tune/ui/<lang>/menucamera.ui, which only has
 //    sd/atlanta/detroit/tokyo - for an added city the menus render off screen.
-//    Current and next race configs go back to San Diego, as after a race
-//    there; the arcade's own selection (0x619B18) keeps the player's city.
+//    The NEXT race config goes back to San Diego; the current one keeps the
+//    added city. EnterStateMC3Frontend (0x1A5B08) unloads every layer down
+//    to the city only when current and next differ in city, time or weather
+//    (then CopyNextToCurrent and the reload): setting BOTH to San Diego, as
+//    this did until 2026-10-01, told it nothing changed - Los Angeles stayed
+//    loaded behind the menus, an empty pack with this renderer gone, and
+//    entering a city again started from that state. The arcade's own
+//    selection (0x619B18) keeps the player's city.
+//    EXCEPT with [boot] nofe = 1: booted straight into the race, this module
+//    was placed in the heap right above the city, and once the city goes the
+//    hole under it (~5.7 MB) cannot take San Diego's 8.9 MB: "Heap (null)
+//    overrun" and the front end never comes up. There both configs still go
+//    to San Diego - no reload, the empty city behind the menus, but no hang.
+//    Through the menus the module sits below the first city and the reload
+//    fits (checked: San Diego back behind the menus).
 // Marker: RFEN <city found> <blocks released>
+// LAN "Return to Lobby" from an added city. Reloading San Diego with its
+// props after Los Angeles does not fit: mcPropManager::Load asks 2.26 MB and
+// the largest free block is 2.21 MB ("Heap (null) overrun"; a small-block
+// page made during the race sits in the middle of the heap). So that one load
+// goes without props: race config +271 is the props switch read by
+// mcPropManager::Load (0 = skip; a failed load would spin forever), cleared
+// here on both configs and set back right after the load (props_load_hook).
+// EXPERIMENTAL, only with [boot] lanp = 1: the load then jumps to address 0
+// in phBoundGeometry::Load and hangs in the ambient traffic file reads
+// (2026-10-01), so by default LAN still goes to San Diego with props and
+// overruns. Marker RFNP <city> <blocks>.
+// [boot] lank = 1 instead keeps the city, both configs and this renderer, as
+// the game does for its own cities, with the menu camera from fe_transition.
+// Marker RFEL <city> <blocks>.
+//
+// DEFAULT since 2026-10-01 (user's choice), any mode: leaving Los Angeles or
+// Paris for the front end keeps that city loaded - both race configs
+// untouched, so EnterStateMC3Frontend reloads nothing - and empty: this
+// renderer is released. The menus are a panel at a fixed place in the world,
+// the same place in both cities, and fe_transition aims the camera at it.
+// No San Diego reload, so no 2.26 MB props block to fit (LAN), and nothing
+// to unload twice. [boot] fesd = 1 brings back the San Diego fallback below.
+// Marker RFEE <city> <blocks>.
+// netManager +16 is the session: 0 in LAN, -1 outside a network game.
+enum { NET_MANAGER = 0x00619D5C, MOVE_FE_CAMERA_GUARD = 0x003396C0,
+       CONFIG_PROPS = 271, PROPS_LOAD_CALL = 0x001BDCF4, PROPS_LOAD = 0x00391E10 };
+static __attribute__((noinline)) volatile mc3_u32 *props_skipped() {
+    static volatile mc3_u32 v;
+    return &v;
+}
+static void props_restore() {
+    if (!*props_skipped()) return;
+    const mc3_u32 cur = word(RACE_CONFIG_CURRENT), next = word(RACE_CONFIG_NEXT);
+    if (ptr(cur)) *(volatile mc3_u8 *)(cur + CONFIG_PROPS) = 1u;
+    if (ptr(next)) *(volatile mc3_u8 *)(next + CONFIG_PROPS) = 1u;
+    *props_skipped() = 0u;
+}
+extern "C" mc3_u32 props_load_hook(mc3_u32 manager) {
+    const mc3_u32 r = MC3_CALL1(mc3_u32, PROPS_LOAD, mc3_u32)(manager);
+    props_restore();
+    return r;
+}
+MC3_HOOK(PROPS_LOAD_CALL, props_load_hook);
+static int in_lan_session() {
+    const mc3_u32 nm = word(NET_MANAGER);
+    return ptr(nm) && word(nm + 16u) == 0u;
+}
+// EE kernel syscall 100: write back D-cache, invalidate I-cache.
+static void ee_flush_cache() {
+    asm volatile("move $4, $0 \n li $3, 100 \n syscall \n"
+                 ::: "$2", "$3", "$4", "$5", "$6", "$7", "memory");
+}
+// mcMenuShell::MoveFECamera skips the camera move for city >= 4
+// (slti $v0, $s1, 4); with the camera supplied below it may move for 4..15.
+static void open_move_fe_camera_guard() {
+    volatile mc3_u32 *ins = (volatile mc3_u32 *)MOVE_FE_CAMERA_GUARD;
+    if (*ins == 0x2A220004u) { *ins = 0x2A220010u; ee_flush_cache(); }
+}
+
 extern "C" mc3_u32 frontend_hook(mc3_u32 game_state) {
     Tracked *t = trk();
     const mc3_u32 blocks = t->n;
+    props_restore();
+    int lan_from_added = 0, from_added = 0;
+    mc3_u32 from_city = 0xFFFFFFFFu;
+    {
+        const mc3_u32 cfg = word(RACE_CONFIG_CURRENT);
+        const mc3_u32 city = ptr(cfg) ? word(cfg) : 0xFFFFFFFFu;
+        from_city = city;
+        from_added = city >= (mc3_u32)FIRST_CITY_WITHOUT_MENU_CAMERA && city < 16u;
+        lan_from_added = from_added && in_lan_session();
+        const char *lank = mc3_bootarg(MC3_ID('l','a','n','k'));
+        if (lan_from_added && lank && lank[0] == '1') {
+            open_move_fe_camera_guard();
+            mark('R','F','E','L', city, blocks);
+            return MC3_CALL1(mc3_u32, ENTER_FRONTEND, mc3_u32)(game_state);
+        }
+    }
     if (t->active || st()) { release_all(); t->active = 0u; }
+    {
+        const char *fesd = mc3_bootarg(MC3_ID('f','e','s','d'));
+        if (from_added && !(fesd && fesd[0] == '1')) {          // the empty city
+            open_move_fe_camera_guard();
+            mark('R','F','E','E', from_city, blocks);
+            return MC3_CALL1(mc3_u32, ENTER_FRONTEND, mc3_u32)(game_state);
+        }
+    }
     const mc3_u32 cfgs[2] = { *(volatile mc3_u32 *)RACE_CONFIG_CURRENT,
                               *(volatile mc3_u32 *)RACE_CONFIG_NEXT };
     mc3_u32 found = 0xFFFFFFFFu;
-    for (int i = 0; i < 2; ++i) {
+    const char *nofe = mc3_bootarg(MC3_ID('n','o','f','e'));
+    const int keep_loaded = nofe && nofe[0] == '1';
+    if (ptr(cfgs[0])) found = *(volatile mc3_u32 *)cfgs[0];
+    for (int i = keep_loaded ? 0 : 1; i < 2; ++i) {
         if (!ptr(cfgs[i])) continue;
         volatile mc3_u32 *city = (volatile mc3_u32 *)cfgs[i];
-        if (i == 0) found = *city;
         if (*city >= (mc3_u32)FIRST_CITY_WITHOUT_MENU_CAMERA && *city < 16u)
             *city = (mc3_u32)FRONTEND_CITY;
+    }
+    const char *lanp = mc3_bootarg(MC3_ID('l','a','n','p'));
+    if (lan_from_added && !keep_loaded && lanp && lanp[0] == '1') {
+        for (int i = 0; i < 2; ++i)
+            if (ptr(cfgs[i])) *(volatile mc3_u8 *)(cfgs[i] + CONFIG_PROPS) = 0u;
+        *props_skipped() = 1u;
+        mark('R','F','N','P', found, blocks);
     }
     mark('R','F','E','N', found, blocks);
     return MC3_CALL1(mc3_u32, ENTER_FRONTEND, mc3_u32)(game_state);
 }
 MC3_HOOK(FRONTEND_CALL, frontend_hook);
+
+// Menu camera of an added city. Every menu screen keeps its camera per city in
+// two Vector3[4] read from tune/ui/<lang>/<screen>.ui ("<city> Look at",
+// "<city> Target": sd/atlanta/detroit/tokyo only) and hands &v[city] to
+// mc3FeView::RequestTransition(view, target, lookat) - for city 5/6 that
+// reads past the arrays. Here: [boot] felk / fetg = "x,y,z" (look-at /
+// target, as in menucamera.ui) when given, else fe_camera_builtin, else the
+// screen's San Diego entry (v[city] - city). Same for every screen.
+enum { FE_REQUEST_TRANSITION = 0x00322518 };
+static int parse_vec3(const char *v, float out[3]) {
+    if (!v || !v[0]) return 0;
+    for (int k = 0; k < 3; ++k) {
+        out[k] = parse_float(&v);
+        while (*v == ',' || *v == ' ') ++v;
+    }
+    return 1;
+}
+static __attribute__((noinline)) float *fe_camera_store() {
+    static float v[6];
+    return v;
+}
+// Built-in menu camera per added city, {target xyz, look-at xyz} as float
+// bits. "Target" is where the camera sits (mc3FeView +1628), "Look at" the
+// point 3.83 m ahead (+1616). Placed by the user in a savestate (2026-10-01):
+// target 684.362,8.108,483.404, look-at 688.185,8.290,483.542.
+// Paris takes the same one: the front-end panel sits at the same world spot
+// in both cities (checked by the user). 0 = none (the San Diego entry).
+static __attribute__((noinline)) const mc3_u32 *fe_camera_builtin(mc3_u32 city) {
+    static const mc3_u32 la[6] = { 0x442B172Bu, 0x4101BA5Eu, 0x43F1B3B6u,
+                                   0x442C0BD7u, 0x4104A3D7u, 0x43F1C560u };
+    return city == 5u || city == 6u ? la : 0;
+}
+extern "C" mc3_u32 fe_transition(mc3_u32 view, mc3_u32 target, mc3_u32 lookat) {
+    const mc3_u32 cfg = word(RACE_CONFIG_CURRENT);
+    const mc3_u32 city = ptr(cfg) ? word(cfg) : 0u;
+    if (city >= (mc3_u32)FIRST_CITY_WITHOUT_MENU_CAMERA && city < 16u) {
+        float *tg = fe_camera_store(), *lk = tg + 3;
+        target -= 12u * city;
+        lookat -= 12u * city;
+        const mc3_u32 *bi = fe_camera_builtin(city);
+        if (bi) { target = (mc3_u32)bi; lookat = (mc3_u32)(bi + 3); }
+        if (parse_vec3(mc3_bootarg(MC3_ID('f','e','t','g')), tg)) target = (mc3_u32)tg;
+        if (parse_vec3(mc3_bootarg(MC3_ID('f','e','l','k')), lk)) lookat = (mc3_u32)lk;
+    }
+    return MC3_CALL3(mc3_u32, FE_REQUEST_TRANSITION, mc3_u32, mc3_u32, mc3_u32)(view, target, lookat);
+}
+MC3_HOOK(0x0033970C, fe_transition); MC3_HOOK(0x00339834, fe_transition);
+MC3_HOOK(0x00339964, fe_transition); MC3_HOOK(0x00339994, fe_transition);
+MC3_HOOK(0x00339B34, fe_transition); MC3_HOOK(0x00339B80, fe_transition);
+MC3_HOOK(0x00339BE4, fe_transition); MC3_HOOK(0x00339C30, fe_transition);
+MC3_HOOK(0x00339C80, fe_transition); MC3_HOOK(0x00339CD0, fe_transition);
+MC3_HOOK(0x00344DD8, fe_transition); MC3_HOOK(0x00344E6C, fe_transition);
+MC3_HOOK(0x00344EEC, fe_transition); MC3_HOOK(0x00344F70, fe_transition);
+MC3_HOOK(0x00344FEC, fe_transition); MC3_HOOK(0x00345060, fe_transition);
+MC3_HOOK(0x003450B4, fe_transition); MC3_HOOK(0x00345358, fe_transition);
+MC3_HOOK(0x00345420, fe_transition);
 
 // The whole city load, before the race starts. mcGameState::EnterStateGame
 // (0x1A5700) ends with jal StartRace (0x1A58F0 -> 0x1A3E70); by then the city,
