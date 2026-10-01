@@ -343,6 +343,39 @@ TOOLS = [
         ),
     ),
     dict(
+        name='City trains and pedestrians',
+        script='mc3_peds_graph.py',
+        gui=False,
+        summary="Put an MC2 city's pedestrian sidewalks into its _peds.pck; list or remove compiled trains.",
+        opens=['.pck', '.graph', '.aib'],
+        detail=(
+            'python mc2_ped_graph.py --city losangeles --out losangeles.graph\n'
+            'python mc3_peds_graph.py losangeles_peds.pck losangeles.graph\n'
+            'python mc3_traffic_trains.py losangeles_traffic.pck --remove\n'
+            '\n'
+            'Pedestrians walk the graph compiled into <city>_peds.pck, not the text\n'
+            '.graph; mc2_ped_graph builds sidewalk strips from the pedestrian rails of\n'
+            "the MC2 city's .aib and mc3_peds_graph appends them to the pack. Trains are\n"
+            'compiled into <city>_traffic.pck; a copied pack runs its trams on any road\n'
+            'of type 3 - mc3_traffic_trains sets their count to 0.'
+        ),
+    ),
+    dict(
+        name='Prop particle rules',
+        script='mc3_prop_ptx.py',
+        gui=False,
+        summary="Extract the particle rules compiled into a city's props pack as text .ptx.",
+        opens=['.pck'],
+        detail=(
+            'python mc3_prop_ptx.py detroit_dusk_clear_props.pck --list\n'
+            'python mc3_prop_ptx.py detroit_dusk_clear_props.pck --out ASSETS/tune/effects\n'
+            '\n'
+            'Each rule (mcPropParticleBirthRule, 0x190 bytes) is written field by\n'
+            'field; mcPropParticleBirthRule::LoadWithHash reads it back byte-identical.\n'
+            "Tiles index the city's <x>_shared_particle atlas (d_ for detroit)."
+        ),
+    ),
+    dict(
         name='Rename an added city',
         script='mc3_rename_city.py',
         gui=False,

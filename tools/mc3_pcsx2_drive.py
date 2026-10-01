@@ -11,6 +11,8 @@ Steps (seconds are wall-clock):
                           circle square triangle start select l1 r1)
     hold BUTTON S         keep a button down for S seconds (BUTTON may be
                           several joined by +, e.g. cross+right)
+    down BUTTON / up BUTTON  press / release and keep going (shots while held)
+    burst NAME N          N screen grabs as fast as possible (NAME_000.png ...)
     key KEYS [N]          tap raw keyboard keys N times (1..9, 0, backspace,
                           enter, shift, ctrl; several joined by +, e.g.
                           shift+2) - for mods that read the USB keyboard
@@ -31,8 +33,7 @@ import time
 
 import mc3_pcsx2_shots as S
 
-INI = os.environ.get('MC3_PCSX2_INI') or os.path.join(
-    os.environ.get('MC3_PCSX2_DATA', os.path.expanduser('~/Documents/PCSX2')), 'inis', 'PCSX2.ini')
+INI = os.path.join(os.environ.get('MC3_PCSX2_DATA', os.path.expanduser('~/Documents/PCSX2')), 'inis/PCSX2.ini')
 # pad button -> (PCSX2 key name, Windows virtual key, extended)
 KEYS = {
     'up': ('Up', 0x26, True), 'down': ('Down', 0x28, True),
@@ -44,7 +45,7 @@ KEYS = {
 }
 RAW = {str(d): (0x30 + d, False) for d in range(10)}
 RAW.update({'backspace': (0x08, False), 'enter': (0x0D, False), 'shift': (0x10, False),
-            'ctrl': (0x11, False)})
+            'ctrl': (0x11, False), 'alt': (0x12, False), 'f9': (0x78, False), 'tab': (0x09, False)})   # ctrl+alt+f9 = video capture
 PAD_NAMES = {'up': 'Up', 'down': 'Down', 'left': 'Left', 'right': 'Right',
              'cross': 'Cross', 'circle': 'Circle', 'square': 'Square',
              'triangle': 'Triangle', 'start': 'Start', 'select': 'Select',
@@ -82,6 +83,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     ap.add_argument('--elf', default=os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'mc3boot.elf'))
     ap.add_argument('--out', required=True)
+    ap.add_argument('--statefile', help='start from this .p2s instead of booting (pcsx2 -statefile)')
     ap.add_argument('steps', nargs='+')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -92,7 +94,11 @@ def main():
     try:
         text = open(INI, encoding='utf-8').read()
         open(INI, 'w', encoding='utf-8').write(add_keyboard(text))
-        p = subprocess.Popen([S.PCSX2, '-batch', '-nogui', '-logfile', S.LOG, '--', a.elf],
+        cmd = [S.PCSX2, '-batch', '-nogui', '-logfile', S.LOG]
+        if a.statefile:
+            cmd += ['-statefile', a.statefile]
+        cmd += ['--', a.elf]
+        p = subprocess.Popen(cmd,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         t0 = time.time()
         for step in a.steps:
@@ -112,6 +118,10 @@ def main():
                     for _name, vk, ext in buttons:
                         key(vk, ext, False)
                     time.sleep(0.45)
+            elif w[0] in ('down', 'up'):         # keep a button held across other steps
+                focus(p.pid)
+                for b in w[1].split('+'):
+                    key(KEYS[b][1], KEYS[b][2], w[0] == 'down')
             elif w[0] == 'key':
                 keys = [RAW[k] for k in w[1].split('+')]
                 for _ in range(int(w[2]) if len(w) > 2 else 1):
@@ -125,6 +135,14 @@ def main():
             elif w[0] == 'shot':
                 path = os.path.join(a.out, w[1] + '.png')
                 print('  %5.1fs  %s  %s' % (time.time() - t0, S.shoot(p.pid, path), path))
+            elif w[0] == 'burst':               # burst NAME N: N grabs back to back (~15-25/s)
+                wins = S.windows_of(p.pid)
+                if wins:
+                    rect = S.client_rect(wins[0][1])
+                    frames = [S.ImageGrab.grab(bbox=rect, all_screens=True) for _ in range(int(w[2]))]
+                    for i, img in enumerate(frames):
+                        img.save(os.path.join(a.out, '%s_%03d.png' % (w[1], i)))
+                    print('  %5.1fs  burst %s x%d' % (time.time() - t0, w[1], len(frames)))
             elif w[0] == 'state':
                 print('  %5.1fs  savestate -> %s' % (time.time() - t0, S.save_state(p.pid)))
             else:

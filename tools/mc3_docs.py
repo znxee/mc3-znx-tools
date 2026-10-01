@@ -23,7 +23,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (BaseDocTemplate, Frame, KeepTogether, PageBreak,
                                 PageTemplate, Paragraph, Spacer, Table, TableStyle)
 
-VERSION = "4.7"
+VERSION = "5.0"
 TITLE = "Midnight Club 3 - File Format Documentation"
 SUBTITLE = "PS2 .pck / PSP .psppck / Xbox .xbck, and the executable"
 
@@ -84,7 +84,7 @@ def fields(rel, off, spec, title=""):
         if label.startswith("f:"):           # float
             label = label[2:]
             val = "= %-10.3f" % struct.unpack("<f", chunk)[0]
-        elif label.startswith("h:"):         # not worth showing a value
+        elif label.startswith("h:"):         # nao vale mostrar valor
             label = label[2:]
         elif sz in (1, 2, 4):
             v = int.from_bytes(chunk, "little")
@@ -1190,6 +1190,78 @@ CONTENT = [
        "768..1023. So the city has <b>no angle-dependent lighting</b>; it is baked per "
        "vertex. The index is not reconstructible - its correlation with the normal is "
        "+0.045/-0.001/+0.059 and with height +0.051."),
+ ("h3", "Trains and pedestrian graphs are compiled into the city packs"),
+ ("p", "A city's trains are not read from <font face=Courier>tune/city/&lt;city&gt;.train</font> at run "
+       "time: they are compiled into <font face=Courier>&lt;city&gt;_traffic.pck</font> (header type 0x3C). "
+       "Its root object is at file offset 0x80 and root+0x11C points at the train manager, whose first "
+       "field is an atArray of mcTrain (pointer, u16 count, u16 capacity): retail San Diego 2, Tokyo 4, "
+       "Detroit 1, Atlanta 0. The tracks are built at load time from every road of type 3 in the city's "
+       ".aib (mcTrainBuilder::BuildTrainTracks 0x232D48); an MC2 .aib uses type 3 for ordinary roads, so a "
+       "traffic pack copied from another city runs its trams through them. Setting the count to 0 removes them."),
+ ("p", "Likewise the pedestrians do not walk on <font face=Courier>city/&lt;city&gt;/&lt;city&gt;.graph</font>: "
+       "retail keeps only mcBaGraph(datResource&amp;), and the graph is the first member of the root of "
+       "<font face=Courier>&lt;city&gt;_peds.pck</font> (type 0x21, root at 0x80)."),
+ ("table", [
+    ["root field", "array", "element"],
+    ["+0x00 / +0x04", "vertices, u16 count + capacity", "Vector3, 12 bytes"],
+    ["+0x08 / +0x0C", "nodes", "40 bytes: u16 vertex[8], u16 connection[8] (0xCDCD unused), u8 vertex count, u8 connection count, u8 type (0 sidewalk, 2 corner), u8 1, float"],
+    ["+0x10 / +0x14", "connections", "u16 vertex1, vertex2, node on that side (6 bytes)"],
+    ["+0x1C / +0x20", "node user data", "3 bytes: 00 01 01 sidewalk, 00 00 00 corner"],
+  ], [30*mm, 45*mm, 95*mm]),
+ ("p", "mcFeedSurfaceManager builds its spawn list from the graph at run time, so appending new arrays "
+       "and repointing the root is enough; a round trip of Tokyo's text graph reproduces the retail node and "
+       "connection bytes exactly."),
+ ("h3", "Prop particles: compiled rules, text .ptx and the shared atlas"),
+ ("p", "A retail prop's particles (hydrant spray, newspapers, splinters, steam) are "
+       "mcPropParticleBirthRule objects (0x190 bytes) compiled into "
+       "<font face=Courier>resources/prop/&lt;city&gt;_&lt;tod&gt;_&lt;weather&gt;_props.pck</font>, each followed "
+       "by its name <font face=Courier>&lt;type&gt;_&lt;part&gt;</font> (+4 points at it). The same object loads "
+       "from text: LoadWithHash 0x390070 / parFileIO::Load 0x55F3D8 read "
+       "<font face=Courier>tune/effects/&lt;name&gt;.ptx</font> (vtable 0x62CD38: directory tune/effects, "
+       "extension and block ptx). mc3_prop_ptx.py writes the compiled rules as text; they reload byte-identical."),
+ ("table", [
+    ["offset", "field (swPtxBirth::FileIO 0x1EFE7C)", "offset", "field (rule, 0x3900F8)"],
+    ["+80 / +84", "Life, LifeVar", "+0x160", "m_inheritMatrix (u8)"],
+    ["+88", "PositionVar", "+0x161", "m_sprayAfterBroken"],
+    ["+100 / +112", "Velocity, VelocityVar", "+0x162", "m_inheritCollisionVelocity"],
+    ["+124", "VelocityDamping", "+0x163", "m_bRecieveAmbientLighting"],
+    ["+136 / +138", "Start/EndTextureTile (s16)", "+0x164", "m_bImpactStrengthAffectsSpawnRate"],
+    ["+152 / +160", "RadiusBirth, RadiusDeathPercent", "+0x168", "m_minForceToSpawn"],
+    ["+172", "Gravity", "+0x16C", "m_emissive"],
+    ["+176 / +192", "ColorBirth, ColorDeath", "+0x170", "m_alwaysOn"],
+    ["+208 / +252", "RotateSpeed, RotateVar", "+0x178", "m_position"],
+    ["+248 / +272", "RadiusVar, NumInitialParticles", "+0x184 / +0x188", "m_spewTimeLimit, m_emitRate"],
+  ], [22*mm, 58*mm, 22*mm, 68*mm]),
+ ("p", "They are thrown by mcPropManager::s_pSwPtx (0x617F6C), a swPropPtxSystem of 256 particles that "
+       "mcLayerCity::Load creates in every city and mcSwPtx::Draw (from mcPlayer::Draw) draws with ONE "
+       "texture, s_pPropParticleTex: <font face=Courier>&lt;x&gt;_shared_particle</font> from the city's texture "
+       "folder, x = s (city 0), a (1), t (3), d (any other, so also cities 5 and 6). The tiles are an 8x8 grid "
+       "of that atlas, so a rule only fits its own city's atlas. mcPropFixed::EmitParticles 0x390B38: count = "
+       "AdjustPropEmissionCount(m_emitRate), position = m_position through the prop matrix, "
+       "BlastTransformed 0x1F42D8; colours times the city ambient (mcCity +0xE0) and the nearest light when "
+       "m_bRecieveAmbientLighting. The system's byte +52 (set for hydrants, copied into each particle) is "
+       "built as 0xCD and only EmitParticles clears it; set, Update 0x1F3850 stops every particle within "
+       "3 m of a car."),
+ ("h3", "Sky and prop lights of an MC2 city"),
+ ("p", "The city's sky is mcSkyHatClass (mcCity+0x190): eight layer models at +0x34..+0x50 (rmcModel*, "
+       "freed by its destructor 0x25BB98, drawn by Draw 0x25C238 with the sky shader group mcCity+0x10) and the "
+       "tune file skyhat_&lt;city&gt;_&lt;tod&gt;_&lt;weather&gt; (SetupTuneData 0x25BC90). A built city pack with null "
+       "layers and an empty group shows only m_clearColor. MC2 keeps its sky in "
+       "<font face=Courier>resource/&lt;city&gt;/&lt;time&gt;_&lt;weather&gt;.rsc</font>: MOD0 sky_0 (dome, radius 100) "
+       "and sky_1..6 (rain clouds), handles 0xC0xx = this container."),
+ ("p", "An MC2 PRP0 carries its lights: +0x18 count, 0xC0-byte records from +0x20 = MC2's light_data "
+       "(+0x0C type, +0x10 position, +0x20 color, +0x30 intensity, +0x34 decay, +0x38 direction, +0x44 spot "
+       "angle, +0x4C draw_glow, +0x50 glow_offset, +0x60 glow_color, +0x70 draw_cone, +0x74..+0x7C cone size/"
+       "intensity/offset, +0x80 cone_color, +0x90 draw_flare, +0x94 flare_offset, +0xA0 flare_color, +0xB0 "
+       "reflection_color). MC3's mcLightData (176 bytes, ctor 0x5958E8, FileIO 0x595B18, dir tune//lightdata) "
+       "has the same fields: +0x0C type, +0x10 intensity, +0x18 local position, +0x24 direction, +0x30 color, "
+       "+0x40 glow, +0x50 cone, +0x60 flare, +0x70 reflection colours, +0x80 flags (1 flashing, 2 directional), "
+       "+0x81..+0x83 draw glow/cone/flare, +0x84 decay, +0x88 spot angle, +0x8C dropoff, +0x90 glow offset, "
+       "+0x94..+0x9C cone, +0xA0 flare offset, +0xA4 flare size. mcLight (36 bytes): +0 world position, +12 next "
+       "in cell, +28 data, +32 s16 cell, +34 flags (4 = on); init 0x259988(light, Matrix34, data); grid "
+       "mcLightManager 0x70FA4C (mcCity+616 cells), AddLightToGrid 0x259658. Drawing is per prop: "
+       "mcPropType::Render calls 0x25A1F8 (reflection, $f12 = prop ground height) in pass 4 and 0x259FF0 "
+       "(glow/cone/flare) in pass 512; both only add to mcGlow's buffers (350 per frame)."),
  ("h3", "MC2 ground textures: the alpha is wetness"),
  ("p", "In MC2's shared texture banks (<font face=Courier>textures_&lt;time&gt;_&lt;weather&gt;.rsc</font>) the "
        "ground textures' CLUT alpha is not opacity but how wet each texel is, per weather. LA, max / mean: "
@@ -1496,8 +1568,8 @@ CONTENT = [
  ("table", [
    ["Pass", "What it uses", "Pairs", "Precision"],
    ["match", "what a function SAYS: the string literals it references, each weighted by rarity", "1224", "98.9%"],
-   ["graph", "the company it keeps: callers and callees already matched, weighted 1/(1+degree)", "3219", "98.2%"],
-   ["neighbours", "where it SITS: a compiler emits a class's methods in source order, so a matched pair starts a run that sizes confirm", "6304", "99.3%"],
+   ["grafo", "the company it keeps: callers and callees already matched, weighted 1/(1+degree)", "3219", "98.2%"],
+   ["vizinhos", "where it SITS: a compiler emits a class's methods in source order, so a matched pair starts a run that sizes confirm", "6304", "99.3%"],
   ], [24*mm, 76*mm, 18*mm, 20*mm]),
  ("p", "Precision is measured, not asserted: a blind hold-out hides 25% of the anchors and "
        "checks whether the pass rediscovers the <b>same address</b>. Total applied: "
@@ -1526,7 +1598,7 @@ CONTENT = [
    ["0x433490", "datTimeManager::Update", "reads Count, produces the frame dt"],
    ["0x433A08", "datTimeManager::RealTime(float)", "rate 0 = measured time. THIS is what runs"],
    ["0x433A50", "datTimeManager::FixedFrame(float, uint)", "fixed step: exists, never selected"],
-   ["0x618E20", "g_frameDt", "the dt the whole game reads (290 references)"],
+   ["0x618E20", "g_dtQuadro", "the dt the whole game reads (290 references)"],
    ["0x618E24", "raw measured dt", "written, never read: a mirror of the measurement"],
    ["0x618E28", "1/dt", "read by 48 places"],
    ["0x618E54", "UI dt", "what mcFlash::Update reads on the negative-delta path"],
@@ -1541,7 +1613,7 @@ CONTENT = [
        "anything that scales by dt is already frame-rate independent."),
  ("h3", "The loading screen"),
  ("p", "Two callers on the loading thread pass a hard-coded delta instead of the frame's: "
-       "<font face=Courier>mcLoading::UpdateFlashFixed30</font> at 0x1AC2A4 with 1/30, and "
+       "<font face=Courier>mcLoading::UpdateFlashFixo30</font> at 0x1AC2A4 with 1/30, and "
        "<font face=Courier>mcLoadingThread::UpdateFlash</font> at 0x28EE68 with 0.033. Both "
        "are sized for 30 fps, so unlocking the frame rate speeds the animation by the same "
        "factor. Both are built as <font face=Courier>lui</font> + <font face=Courier>ori</font>, "
@@ -1753,11 +1825,11 @@ CONTENT = [
     ["mc3_pnach.py", "audits the pnach set; --to-cpp turns the groups into a payload table"],
     ["mc3_selftest.py", "replicas of patched functions, tested against savestate numbers"],
     ["modloader/", "runs your own C++ inside the game; chain loader, .mod modules, .ini"],
-    ["mc3_city_build.py", "builds a city .pck from scratch; --graft grafts one generated piece"],
+    ["mc3_city_build.py", "builds a city .pck from scratch; --enxerta grafts one generated piece"],
     ["mc3_place_sim.py", "runs the loader Place walk on the PC: says what would hang, before booting"],
     ["mc3_city_strip.py", "empties a city, keeping what matches a name or a radius"],
     ["mc3_hood_fill.py", "replaces every unique mesh of one hood; ports a whole MC2 neighbourhood"],
-    ["mc3_output.py", "one place for generated files: everything lands in output/"],
+    ["mc3_saida.py", "one place for generated files: everything lands in output/"],
     ["mc3_docs.py", "generates this document"],
   ], [45*mm, 93*mm]),
 ]),
@@ -1808,7 +1880,7 @@ CONTENT = [
        "block instead of NULL runs a constructor once over zeros."),
  ("p", "<font face=Courier>mc3_place_sim.py</font> replays all of this on the PC and reports "
        "what the game would hit, which turns a console boot into a command. Its "
-       "<font face=Courier>--coverage</font> mode also says which structures it does NOT "
+       "<font face=Courier>--cobertura</font> mode also says which structures it does NOT "
        "verify - 5 of the 14 the constructor touches are modelled today."),
 ]),
 
@@ -1912,7 +1984,7 @@ CONTENT = [
           "validate the test against a string known to be live before trusting a negative."),
  ("p", "So placement has to come from the binary city <font face=Courier>.pck</font> or "
        "from a consumer reading a table of its own. "
-       "<font face=Courier>mc2_port.py city</font> exports the latter: for Los Angeles, "
+       "<font face=Courier>mc2_port.py cidade</font> exports the latter: for Los Angeles, "
        "729 meshes, one 4.2 MB text <font face=Courier>otgrid</font> holding the whole "
        "city's collision, 512 texture names, and 8809 placements &mdash; 298 components "
        "and 8511 instances, with the AABB of each, because culling 8809 draws is a "

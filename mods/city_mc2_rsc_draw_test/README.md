@@ -91,7 +91,7 @@ zero as it is for Los Angeles.
 each, instead of the player - whole races can run unattended and be
 photographed along every route. Same technique as the Orbit mode of
 AlgumCorrupto's freecam (CinematicClub,
-`FreeCam/OpponentCam.cpp`): every car is an instance with vtable 0x00627630,
+FreeCam/OpponentCam.cpp): every car is an instance with vtable 0x00627630,
 Matrix34 at +0x10; the player's own (*(player+20)+0x18) is skipped. The heap is
 scanned for them when the list is empty, stale or at each switch. Look-at from
 7 m behind and 2.5 m above. Marker `RSPC <cars> <switches>`.
@@ -358,13 +358,158 @@ m_car 1500), tips over its base towards the hit (90 degrees), falls, lands at
 its base height and slides with friction to rest; the car keeps
 1 - 0.6 m/(1500 + m) of its speed. Masses from MC2's own tune/phys/<prop>.phys.
 Up to 48 props move at once; a knocked prop stays where it lies until the city
-is reloaded. Breakparts and particles of MC2 are not reproduced (the whole prop
-falls). TO DO (asked by the user): make these props behave like the
-matching MC3 props - the MC3 prop/banger system (break parts, particles,
-sounds, real physics against the car) instead of this approximation.
+is reloaded. Breakparts of MC2 are not reproduced (the whole prop falls);
+particles are MC3's since 2026-09-30 (next section). Still to do: MC3 break
+parts and sounds.
 Markers `RPHT <prop> <count>`, `RPH2 <type | mass << 16> <speed>`,
 `RPRS <prop> <angle>` at rest, `RCAR` car x/z. Diagnostic `[boot] mc2h = 1`
 lines the three nearest movable props up 12/20/28 m ahead of the start.
+
+### MC3 particles on the MC2 props (2026-09-30)
+
+The props stay the MC2 ones, read from the .rsc; their effects are now MC3's
+(`step_prop_fx`, `fx_on_hit`). An MC2 template names its effects as parts,
+`name: <template>_particle_<effect>`; `prop_part` maps each effect to the MC3
+prop particle rule of the same kind (`fx_map()`: newspaper -> detroit's
+newstand paper, trash/trashbag/dumpster, wood_splinters -> bench or pallet
+splinters, splinter_tree + leaf_tree -> tree splinters, dust and dead leaves,
+leaf_bush, mail/letters, coin, firehydrant -> the hydrant spray, steam and
+smokestack -> steam, cherubpee/fountain -> the fountain spray, sparks on a
+telephone pole -> wood + dust). MC2 effects with no MC3 counterpart in
+detroit's set (glass, gas pump, poo, fruit, skulls, light-pole sparks) throw
+nothing.
+
+The rules are the retail ones: MC3 compiles them into the props packs, and
+`mc3_prop_ptx.py` writes detroit's as text `tune/effects/<rule>.ptx`
+(field table and offsets in its docstring; the text reloads byte-identical to
+the compiled rule). Each rule is built in this module's memory
+(mcPropParticleBirthRule ctor 0x38FFC8, name at +4, parFileIO::Load
+0x55F3D8), not through LoadWithHash - its global hash would outlive the
+city's heap - and textured with SetTexture(rule, s_pPropParticleTex, 8, 8).
+They are thrown by the game's own prop particle system,
+mcPropManager::s_pSwPtx 0x617F6C (swPropPtxSystem, 256 particles, created by
+mcLayerCity::Load in every city, drawn by mcSwPtx::Draw from mcPlayer::Draw),
+with BlastTransformed 0x1F42D8 at the rule's m_position through the prop's
+matrix, count = m_emitRate as AdjustPropEmissionCount does it. For cities 5
+and 6 the game loads the atlas `d_shared_particle` from the city's texture
+folder: the installer copies detroit's there.
+
+- hit (movable prop, or a solid one once per prop / 1.5 s): every rule that
+  is not always on, when speed x 1500 kg reaches m_minForceToSpawn;
+- m_sprayAfterBroken (hydrant): keeps spraying m_spewTimeLimit (10 s) where
+  it stood, up to 8 at once;
+- m_alwaysOn (steam vents, fountains): every frame within 70 m of the
+  camera, at most 6 per frame; templates with particles and no model are now
+  placed (not drawn) for this - LA 19 emitters, Paris 54;
+- m_bRecieveAmbientLighting: colours times the city ambient (mcCity +0xE0)
+  lifted by m_emissive, for that blast only (the nearest-light term of
+  EmitParticles is left out - MC2's lights are not mcLights).
+
+Two traps. The system's byte +52 (the hydrant flag, copied into every
+particle) is built as 0xCD and only EmitParticles ever clears it: left set,
+Update 0x1F3850 stops every particle within 3 m of a car - the newspapers
+from the player's own hit hung invisible under the car. It is written on
+every blast. And release_all resets the system (PTX_RESET 0x1F4538, all
+particles dead) before our rules are freed, since each particle points at its
+rule. `[boot] mc2f = 0` turns the particles off (was mc2x, which with mc2y/mc2z places the camera); `mc2h = 2` lines up the
+nearest hydrant, steam vent (4 m aside) and trash prop instead. Markers
+`RPFX <rules used> <rules loaded>`, `RPF2 <ambient emitters> <atlas>`,
+`RPFB <prop | fx count << 24> <blasts>`. Measured: LA newspapers and cans fly,
+a knocked hydrant keeps 168 spray particles up with 39 steam particles
+beside it; Paris cans from a trash bin. Sounds and MC3 break parts are not
+done yet.
+
+### MC2's sky and MC2's prop lights as MC3 lights (2026-09-30)
+
+**Why there was no sky.** The city .pck we build has no sky: its
+mcSkyHatClass (mcCity+0x190) loads `skyhat_<city>_<tod>_<weather>.parfileio`
+but its eight layer models (+0x34..+0x50, rmcModel*, drawn by
+mcSkyHatClass::Draw 0x25C238 with the sky shader group mcCity+0x10) are null
+and that group has 0 slots (retail 10-12), so MC3 only clears to
+m_clearColor. MC2's own sky was never installed: it lives in
+`resource/<city>/<time>_<weather>.rsc` (222 KB), MOD0 `sky_0` (the dome, radius
+100 m, y -4..42, five textures `l_shared_sky_*`) plus `sky_1..sky_6` cloud
+layers when rainy, textures in the same container (handles 0xC0xx). Now
+`step_sky` reads it whole (container 3 for tex_entry/make_slot) and
+`queue_sky` draws every MOD0 layer first in draw_city, at the camera's
+position, depth test ALWAYS and no Z write. `[boot] mc2b = 0` turns it off;
+marker `RSKY <layers> <bytes>`, `RSKE <why>` on failure. The installer must
+copy the nine `<time>_<weather>.rsc/.rnt` per city to `host0:/mc2/<city>/`.
+
+**Lights.** An MC2 prop's lights are compiled into its PRP0: +0x18 count,
+0xC0-byte records from +0x20 holding MC2's `tune/lightdata/<prop>_<n>.light_data`
+(offsets in `step_lights`' comment, checked field by field). MC3's
+mcLightData (176 bytes, FileIO 0x595B18, dir `tune//lightdata`) is the same
+class with the same field names, so each record becomes one; each placed
+lamp gets an mcLight (init 0x259988, as mcPropLightData::CreateLights) in
+mcLightManager's grid (AddLightToGrid 0x259658) - MC3 lights cars and
+particles from it - and every frame the lamps within 160 m go through what
+mcPropType::Render does with prop lights: 0x259FF0 (glow, cone, flare) and
+0x25A1F8 (road reflection, ground height in $f12). Both only fill mcGlow's
+buffers (350 a frame), so calling them from the SetCamera hook works. A
+knocked-down lamp goes dark. TRAP: this toolchain passes a float second
+argument in $f13; the game expects $f12 - `light_reflect` calls by hand.
+Measured: LA 30 light types / 3627 lamps, Paris 18 / 4052; Paris midnight
+at 57-59 fps. `[boot] mc2l = 0` turns them off; markers `RLGT`, `RLGX`.
+Released from the grid in release_all while the manager is the same.
+
+### Time and weather from the race; sky before the palette (2026-09-30)
+
+The renderer took time of day and weather from `[boot] time/weather`, so an
+Arcade race picked at dawn in the menu still drew midnight's CPVS, textures,
+props and sky (player's savestate: race config tod 0 / weather 0, boot key
+midnight). `cond_time()`/`cond_weather()` now read mcRaceConfig current
+(0x619B10) +4/+8 through the game's name tables 0x619B48 (dawn, midnight,
+dusk) and 0x619B58 (clear, cloudy, rainy); the boot keys are only the
+fallback. And the first sky build drew the sky between the CPVS palette
+upload and the city: the sky's MOD0 packets unpack over the VU memory the
+palette sits in, so the city took vertex colours from sky data - yellow,
+blue and magenta patches that changed with the camera. The sky now goes
+right after the bootstrap, before the palette (A/B at the player's camera:
+patches with the old order, none with the new).
+
+### Glow cards: per-card distance in the VU (2026-09-30)
+
+A card instance is a whole block of shop windows (130-270 m, one PMD of
+7-10 batches spanning 40-115 m each), so the CPU cannot drop single cards.
+The card pass now uploads its own view-projection to VU q[4..7]
+(`card_vp`, UNPACK to 4, the normal one re-sent after the cards): the depth
+row becomes z' = (1 + e/D) d - e (d = view depth = w, e = 0.5 m), inside
+[-w, w] only for d < D, so rv1's CLIP drops every card triangle beyond D.
+Checked both ways (the inverse row kept only what lay beyond D). The CPU
+keeps a block while its sphere comes within D (distance - radius). D =
+`[boot] mc2k = N` (10..2000), default 200; `mc2k = 0` still turns the cards
+off. What the cards are: windows mirrored deep under the road, so a far
+block paints the near road at grazing angles and the cards of the shop you
+are passing show little - reflections are seen from a distance and fade as
+you reach the shop, as in MC2. The first version (distance to the block's
+centre, 60 m) dropped whole blocks while driving beside them.
+
+### Frame budget (2026-09-30)
+
+The player's fast flicker on Hollywood's avenues, invisible in screenshots
+and in PCSX2's own video capture: frames that miss the 30 fps deadline are
+held a third vblank, which flips the interlaced field. Measured with the EE
+cycle counter (COP0 Count) around set_camera_hook - markers `RCYC <avg>
+<max>`, `RCY2 <physics K | fx K> <lights K | draw K>`, `RCY3/RCY4` for
+draw_city's parts - on that street (a 30 fps frame is 9.83 M cycles):
+before 2.4-2.9 M a frame, after 1.2-1.7 M. What it was:
+- the props loop called props_enabled() - a boot-arg string lookup - in its
+  condition, 5700 times a frame (~0.9 M);
+- update_model_matrix asked world_mode() (same lookup) for every component;
+- queue_pcp resolved every CPVS REF again each frame (~10 000 in LA); now
+  resolved once and kept in the tag (bit 24 of the tag's low word,
+  REF_RESOLVED; bit 31 of MC2's handle could not be the flag - it holds a
+  12-bit index + 1, and using it sent garbage REFs: DMA errors);
+- sphere_visible rebuilt the frustum planes from the matrix on every call;
+  now frustum_update() once a frame;
+- the prop lights: all lamps within 160 m went through MC3's glow and
+  reflection code, in view or not; now in view, 120 m, 48 a frame (with
+  them on, 120 frames had taken up to 4.79 s instead of 4.00).
+`mc2g = Fd` (drop test "drive" mode) starts a drive anywhere: the car put
+at the point facing its velocity and thrown once, the game's camera left
+alone. Boot keys renamed: particles `mc2f` (was mc2x), sky `mc2b` (was
+mc2y) - mc2x/mc2y/mc2z together already place the camera.
 
 ### VU bootstrap built at run time
 
@@ -681,7 +826,7 @@ reported 1,904 visible instances and 2,373 visible PMD draws. No renderer,
 VIF, or exception error appeared. The seven early TLB misses at
 `0x3f3ae148` match the previously documented baseline. Captures and log are
 under `$MC3_WORK/rsc_allcity_20260924/current_mod_defer_test/`
-and `$MC3_PCSX2_DATA/logs/cli_test.txt`.
+and `$MC3_PCSX2_DATA/logs/cli_teste.txt`.
 
 The user's freecam inspection says the current geometry appears aligned; this
 does not yet validate every district or join. The 2026-09-25 RSC texture test

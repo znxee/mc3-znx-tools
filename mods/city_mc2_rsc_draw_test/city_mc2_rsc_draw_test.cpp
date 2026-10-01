@@ -91,9 +91,12 @@ enum {
     PRP0 = 0x30505250,
     MOD0 = 0x30444F4D,
     MATRIX_BYTES = 64,
-    VIF_UNPACK_MATRIX = 0x6C04000Cu   // UNPACK V4-32 x4 -> VU 12
+    VIF_UNPACK_MATRIX = 0x6C04000Cu,  // UNPACK V4-32 x4 -> VU 12
+    VIF_UNPACK_VIEWPROJ = 0x6C040004u // UNPACK V4-32 x4 -> VU 4 (view-projection)
 };
 enum { MAX_TOUR_POINTS = 256, MAX_PINS = 128 };
+enum { REF_RESOLVED = 0x01000000u };   // queue_pcp: this CPVS REF's address is final
+enum { FX_RULE_COUNT = 17, MAX_SPOUTS = 8, MAX_FX_AMBIENT = 128, MAX_SKY_LAYERS = 8 };
 
 struct Target {
     mc3_u32 pmd;
@@ -147,6 +150,22 @@ struct PropType {
     // a tree or palm: its cull sphere is the canopy (up to 11 m), the car
     // hits the trunk
     mc3_u32 trunk;
+    // MC3 particle rules standing in for the template's MC2 particle parts
+    // (prop_part, FX_* indices), and whether one of them is always on
+    mc3_u8 fx[4], fx_count, fx_always;
+    // the PRP0's compiled lights (MC2 light_data): count and first record
+    mc3_u32 light_n, light_rec, light_data;
+};
+// One layer of MC2's sky (sky_N MOD0 of <time>_<weather>.rsc)
+struct SkyLayer {
+    mc3_u32 packets, addr[MAX_PROP_PACKETS];
+    mc3_u16 qwc[MAX_PROP_PACKETS], slot[MAX_PROP_PACKETS];
+};
+// A hydrant that keeps spraying after the hit (m_sprayAfterBroken, for
+// m_spewTimeLimit seconds) where it stood.
+struct FxSpout {
+    mc3_u32 rule;
+    float left, m[16];
 };
 // A prop the car has hit: it tips over its base, flies, lands and slides.
 struct DynProp {
@@ -246,6 +265,23 @@ struct State {
     mc3_u32 rsc_state, rsc_stream, rsc_size, rsc_count, rsc_cursor;
     mc3_u32 rsc_table_mem, rsc_table, rsc_scratch_mem, rsc_scratch;
     mc3_u32 rsc_error, rsc_reported, load_index;
+    // MC3 prop particles on the MC2 props (step_prop_fx)
+    mc3_u32 fx_state, fx_mem, fx_sys, fx_tex, fx_rules[FX_RULE_COUNT];
+    mc3_u32 fx_last_solid, fx_last_frame, fx_frame, fx_ambient_count, fx_blasts;
+    FxSpout spouts[MAX_SPOUTS];
+    mc3_u16 fx_ambient[MAX_FX_AMBIENT];
+    // MC2's sky (step_sky / queue_sky)
+    float sky_matrix[16] __attribute__((aligned(16)));
+    float card_vp[16] __attribute__((aligned(16)));      // view-projection of the card pass
+    mc3_u32 sky_state, sky_stream, sky, sky_bytes, sky_done, sky_count, sky_layers;
+    SkyLayer sky_layer[MAX_SKY_LAYERS];
+    // MC2 prop lights as MC3 mcLights (step_lights)
+    mc3_u32 light_state, light_mgr, light_count, light_objs, light_props, lights_drawn;
+    mc3_u32 cyc_sum, cyc_max, cyc_frames;                // set_camera_hook cost (RCYC)
+    mc3_u32 cyc_phys, cyc_fx, cyc_lights, cyc_draw;      // its parts (RCY2, in K cycles)
+    mc3_u32 prof[5];
+    float fr[24] __attribute__((aligned(16)));           // frustum_update: eye, radius, 5 planes
+    mc3_u32 fr_ok;                                     // draw_city: setup/sky, components, instances, props, reflect (RCY3/4)
 };
 // State lives on the heap, taken when a race in an MC2 city starts
 // (state_acquire) and given back with everything else (release_all). As a
@@ -257,6 +293,7 @@ struct State {
 static State *g_state_ptr;
 static mc3_u32 g_state_mem;
 static __attribute__((noinline)) State *st() { return g_state_ptr; }
+static mc3_u32 cycles_now() { mc3_u32 c; __asm__ volatile("mfc0 %0, $9" : "=r"(c)); return c; }
 static __attribute__((noinline)) State **state_slot() { return &g_state_ptr; }
 static __attribute__((noinline)) mc3_u32 *state_mem_slot() { return &g_state_mem; }
 
@@ -537,6 +574,9 @@ static int alloc_frame_mem() {
     return 1;
 }
 
+static float card_distance();
+static float ffrom(mc3_u32 bits);
+static inline float fsqrt(float x);
 static int update_view_projection() {
     State *s = st();
     const mc3_u32 cam = s->camera, viewport = word(PROJ_MATRIX_PTR);
@@ -567,10 +607,36 @@ static int update_view_projection() {
     }
     mc3_u32 *dst = (mc3_u32 *)(s->bootstrap + s->matrix_offset);
     for (int i = 0; i < 16; ++i) dst[i] = fbits(vp[i]);
+    // The card pass: same matrix, its depth row replaced so that the VU's
+    // clipper (rv1: CLIP of the clip-space position against w, triangles
+    // whose three vertices share a flag are dropped) loses every card vertex
+    // farther than card_distance() D. With d = -z_view = w:
+    // z' = (1 + e/D) d - e stays inside [-w, w] for e/2 < d < D and leaves it
+    // at D - so each card quad beyond D goes, one card at a time, where the
+    // CPU only sees whole blocks of 130-270 m (7-10 batches of 40-115 m
+    // each). Checked both ways: the inverse row (z' = (1 - e/D) d + e) kept
+    // only what lay beyond D. The cards draw with depth test ALWAYS, so the
+    // altered z feeds nothing else. Note what the cards are: windows
+    // mirrored deep under the road, so a far block paints the near road at
+    // grazing angles and a near one shows little - reflections are seen from
+    // a distance and fade as you reach the shop, in MC2 too.
+    {
+        const float D = card_distance(), e = ffrom(0x3F000000u);   // 0.5 m
+        float pc[16];
+        for (int i = 0; i < 16; ++i) pc[i] = proj[i];
+        pc[2] = ffrom(0u); pc[6] = ffrom(0u);
+        pc[10] = -(ffrom(0x3F800000u) + e / D);
+        pc[14] = -e;
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) {
+            float sum = 0;
+            for (int k = 0; k < 4; ++k) sum += view[r*4+k] * pc[k*4+c];
+            s->card_vp[r*4+c] = sum;
+        }
+    }
     return 1;
 }
 
-static void update_model_matrix(Piece *piece, const Target *target) {
+static void update_model_matrix(Piece *piece, const Target *target, int native) {
     State *s = st();
     if (target->flags == 1u) return;  // instance matrix is queued separately
     if (!piece->packet || !ptr(s->camera)) return;
@@ -585,7 +651,6 @@ static void update_model_matrix(Piece *piece, const Target *target) {
     const float rz = fword((const mc3_u32 *)(s->camera + 8u));
     // Source models are world-baked. A shared preview origin keeps adjacent
     // models in their original relative positions instead of stacking them.
-    const int native = world_mode();
     const float tx = native ? 0.0f :
         px - bx * target->forward + rx * target->lateral - target->ox;
     const float ty = native ? 0.0f :
@@ -610,38 +675,59 @@ static int outside_plane(float a, float b, float c, float d,
     return distance * distance > radius * radius * normal2;
 }
 
-static int sphere_visible(float x, float y, float z, float radius) {
+// The frustum of this frame, built once (frustum_update, right after
+// update_view_projection): camera position, draw radius and the five side
+// planes, normalised. Until 2026-09-30 sphere_visible rebuilt the planes from
+// the bootstrap's matrix at every call - for 8500 instances and 5700 props a
+// frame that was ~2 M of the ~2.7 M EE cycles the city draw took on
+// Hollywood's avenues, enough to push frames past 30 fps (player's flicker).
+// The VU uses row vectors: clip.x = x*m[0] + y*m[4] + z*m[8] + m[12], so the
+// planes come from matrix columns, not contiguous rows (using rows rejected
+// visible models as the camera rotated). Z is left to the GS.
+static void frustum_update() {
     State *s = st();
+    s->fr_ok = 0u;
     const mc3_u32 camera = s->camera;
-    if (!ptr(camera)) return 0;
-    const float dx = x - fword((const mc3_u32 *)(camera + 36u));
-    const float dy = y - fword((const mc3_u32 *)(camera + 40u));
-    const float dz = z - fword((const mc3_u32 *)(camera + 44u));
-    const float limit = st()->draw_radius + radius;
-    if (dx * dx + dy * dy + dz * dz > limit * limit) return 0;
-
-    // The VU uses row vectors: clip.x = x*m[0] + y*m[4] + z*m[8] + m[12].
-    // Build clip planes from matrix columns, not contiguous rows. Using rows
-    // here rejects visible models as the camera rotates and makes broad holes.
-    // Leave Z clipping to the GS, whose native depth range is calibrated.
-    if (!s->bootstrap || s->matrix_offset + 64u > s->bootstrap_bytes) return 0;
+    if (!ptr(camera) || !s->bootstrap || s->matrix_offset + 64u > s->bootstrap_bytes) return;
+    float *f = s->fr;
+    f[0] = fword((const mc3_u32 *)(camera + 36u));
+    f[1] = fword((const mc3_u32 *)(camera + 40u));
+    f[2] = fword((const mc3_u32 *)(camera + 44u));
+    f[3] = draw_radius();
     const mc3_u32 *vp = (const mc3_u32 *)(s->bootstrap + s->matrix_offset);
-    const float wx = fword(vp + 3), wy = fword(vp + 7);
-    const float wz = fword(vp + 11), w0 = fword(vp + 15);
-    const float xx = fword(vp + 0), xy = fword(vp + 4);
-    const float xz = fword(vp + 8), x0 = fword(vp + 12);
-    const float yx = fword(vp + 1), yy = fword(vp + 5);
-    const float yz = fword(vp + 9), y0 = fword(vp + 13);
-    if (outside_plane(wx, wy, wz, w0, x, y, z, radius) ||
-        outside_plane(wx + xx, wy + xy, wz + xz, w0 + x0,
-                      x, y, z, radius) ||
-        outside_plane(wx - xx, wy - xy, wz - xz, w0 - x0,
-                      x, y, z, radius) ||
-        outside_plane(wx + yx, wy + yy, wz + yz, w0 + y0,
-                      x, y, z, radius) ||
-        outside_plane(wx - yx, wy - yy, wz - yz, w0 - y0,
-                      x, y, z, radius)) return 0;
+    const float wx = fword(vp + 3), wy = fword(vp + 7), wz = fword(vp + 11), w0 = fword(vp + 15);
+    const float xx = fword(vp + 0), xy = fword(vp + 4), xz = fword(vp + 8), x0 = fword(vp + 12);
+    const float yx = fword(vp + 1), yy = fword(vp + 5), yz = fword(vp + 9), y0 = fword(vp + 13);
+    const float pl[5][4] = {
+        { wx, wy, wz, w0 },
+        { wx + xx, wy + xy, wz + xz, w0 + x0 }, { wx - xx, wy - xy, wz - xz, w0 - x0 },
+        { wx + yx, wy + yy, wz + yz, w0 + y0 }, { wx - yx, wy - yy, wz - yz, w0 - y0 },
+    };
+    for (int k = 0; k < 5; ++k) {
+        float *q = f + 4 + k * 4;
+        const float n2 = pl[k][0] * pl[k][0] + pl[k][1] * pl[k][1] + pl[k][2] * pl[k][2];
+        if (n2 > ffrom(0x2EDBE6FFu)) {                          // 1e-10
+            const float inv = ffrom(0x3F800000u) / fsqrt(n2);
+            q[0] = pl[k][0] * inv; q[1] = pl[k][1] * inv; q[2] = pl[k][2] * inv; q[3] = pl[k][3] * inv;
+        } else {                                                // degenerate: never culls
+            q[0] = q[1] = q[2] = ffrom(0u); q[3] = ffrom(0x3F800000u);
+        }
+    }
+    s->fr_ok = 1u;
+}
+static inline int fr_visible(const float *f, float x, float y, float z, float radius) {
+    const float dx = x - f[0], dy = y - f[1], dz = z - f[2];
+    const float limit = f[3] + radius;
+    if (dx * dx + dy * dy + dz * dz > limit * limit) return 0;
+    for (int k = 0; k < 5; ++k) {
+        const float *q = f + 4 + k * 4;
+        if (q[0] * x + q[1] * y + q[2] * z + q[3] < -radius) return 0;
+    }
     return 1;
+}
+static int sphere_visible(float x, float y, float z, float radius) {
+    const State *s = st();
+    return s->fr_ok && fr_visible(s->fr, x, y, z, radius);
 }
 
 static int piece_visible(const Piece *piece, const Target *target) {
@@ -653,7 +739,8 @@ static int piece_visible(const Piece *piece, const Target *target) {
 }
 
 static int instance_visible(const mc3_u32 *record) {
-    return sphere_visible(fword(record + 1), fword(record + 2),
+    const State *s = st();
+    return s->fr_ok && fr_visible(s->fr, fword(record + 1), fword(record + 2),
                           fword(record + 3), fword(record + 4));
 }
 
@@ -1078,6 +1165,24 @@ static __attribute__((noinline)) const char *default_weather() {
     static const char s[] = "clear";
     return s;
 }
+// The race's time of day and weather: mcRaceConfig (current, 0x619B10) +4 and
+// +8, named by the game's own tables mc::TODNames 0x619B48 (dawn, midnight,
+// dusk) and mc::WeatherNames 0x619B58 (clear, cloudy, rainy) - MC2 names its
+// files the same way. Until 2026-09-30 this read [boot] time/weather, so an
+// Arcade race picked at dawn in the menu drew midnight's CPVS, textures,
+// props and sky. The boot keys stay the fallback when there is no config.
+enum { TOD_NAMES = 0x00619B48, WEATHER_NAMES = 0x00619B58 };
+static const char *cond_name(mc3_u32 field, mc3_u32 table, mc3_u32 boot, const char *fallback) {
+    const mc3_u32 cfg = *(volatile mc3_u32 *)RACE_CONFIG_CURRENT;
+    if (cfg >= 0x00100000u && cfg < 0x02000000u) {
+        const mc3_u32 i = *(volatile mc3_u32 *)(cfg + field);
+        if (i < 3u) return (const char *)*(volatile mc3_u32 *)(table + 4u * i);
+    }
+    const char *v = mc3_bootarg(boot);
+    return v && v[0] ? v : fallback;
+}
+static const char *cond_time() { return cond_name(4u, TOD_NAMES, MC3_ID('t','i','m','e'), default_time()); }
+static const char *cond_weather() { return cond_name(8u, WEATHER_NAMES, MC3_ID('w','e','a','t'), default_weather()); }
 static int append(char *out, int at, const char *text) {
     while (*text && at < 94) out[at++] = *text++;
     out[at] = 0;
@@ -1130,6 +1235,11 @@ static mc3_u32 tex_entry(mc3_u32 container, mc3_u32 handle, mc3_u32 fourcc) {
     const mc3_u32 index = (handle & 0x3FFFu) - 1u;
     if (!(handle & 0x3FFFu)) return 0u;
     if (container == 2u) return amb_entry(index, fourcc);
+    if (container == 3u) {                              // the sky, read whole (step_sky)
+        if (!s->sky || index >= s->sky_count) return 0u;
+        if (word(s->sky + 12u + index * 8u) != fourcc) return 0u;
+        return s->sky + word(s->sky + 8u + index * 8u);
+    }
     if (container == 0u) {
         if (index >= s->rsc_count || !s->tex_dest) return 0u;
         if (s->tex_type[index] != fourcc) return 0u;
@@ -1145,9 +1255,9 @@ static mc3_u32 make_slot(mc3_u32 container, mc3_u32 tex) {
     State *s = st();
     const mc3_u32 w = word(tex + 0x88u) & 0xFFFFu, h = word(tex + 0x88u) >> 16;
     const mc3_u32 hpal = word(tex + 0x90u), hmip = word(tex + 0x94u);
-    // "this container": bit 15 in ambients, bit 14 in the city container;
-    // neither = the shared bank
-    const mc3_u32 local = container == 2u ? 0x8000u : 0x4000u;
+    // "this container": bit 15 in ambients, bit 14 in the city container,
+    // both (0xC0xx) in the sky's; neither = the shared bank
+    const mc3_u32 local = container == 2u ? 0x8000u : container == 3u ? 0xC000u : 0x4000u;
     const mc3_u32 mip = tex_entry((hmip & local) ? container : 1u, hmip, MIP0);
     const mc3_u32 pal = tex_entry((hpal & local) ? container : 1u, hpal, PAL0);
     if (!mip || !pal || w < 8u || h < 8u || w > 256u || h > 256u ||
@@ -1358,13 +1468,11 @@ static void step_shared_textures() {
     State *s = st();
     if (s->shared_state == 0u) {
         char path[96];
-        const char *t = mc3_bootarg(MC3_ID('t','i','m','e'));
-        const char *w = mc3_bootarg(MC3_ID('w','e','a','t'));
         int n = append(path, 0, cpvs_folder());
         n = append(path, n, textures_prefix());
-        n = append(path, n, t && t[0] ? t : default_time());
+        n = append(path, n, cond_time());
         path[n++] = '_'; path[n] = 0;
-        n = append(path, n, w && w[0] ? w : default_weather());
+        n = append(path, n, cond_weather());
         append(path, n, rsc_suffix());
         const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)
             (path, STREAM_RAW);
@@ -1403,6 +1511,93 @@ static void step_shared_textures() {
     if (!valid) { s->texture_error = 8u; s->shared_state = 3u; return; }
     s->shared_count = count;
     s->shared_state = 2u;
+}
+
+// ---------------------------------------------------------------------------
+// MC2's sky. Why there was none: the city .pck we build has no sky - its
+// mcSkyHatClass (mcCity+0x190) loads skyhat_<city>_<tod>_<weather>.parfileio
+// (colours, lightning) but its eight layer models (+0x34..+0x50, rmcModel*,
+// drawn by mcSkyHatClass::Draw 0x25C238 with the sky shader group mcCity+0x10)
+// are all null and that group has no slot, so MC3 only clears the screen to
+// m_clearColor. And MC2's sky was never installed: it is not in the city or
+// ambients containers but in resource/<city>/<time>_<weather>.rsc (222 KB),
+// MOD0 sky_0 (the dome: radius 100 m, y -4..42, five textures) and, rainy,
+// sky_1..sky_6 (cloud layers), with their TEX0/MIP0/PAL0, handles 0xC0xx =
+// this container. MC2 draws it around the camera before everything else.
+// Here: the container read whole (container 3 for tex_entry/make_slot), each
+// MOD0 a layer, queued first in draw_city at the camera's position with depth
+// test ALWAYS and no Z write, so the city covers it. [boot] mc2b = 0: no sky.
+// ---------------------------------------------------------------------------
+static int sky_enabled() {
+    const char *value = mc3_bootarg(MC3_ID('m','c','2','b'));
+    return !value || value[0] != '0';
+}
+static void load_sky_layer(mc3_u32 m) {
+    State *s = st();
+    if (s->sky_layers >= MAX_SKY_LAYERS) return;
+    const mc3_u32 n = word(m) & 0xFFFFu;
+    if (!n || n > MAX_PROP_PACKETS || (word(m) >> 16) != 1u) return;
+    SkyLayer *l = &s->sky_layer[s->sky_layers];
+    const mc3_u32 mat = m + word(m + 4u), pkt = m + word(m + 8u);
+    for (mc3_u32 k = 0; k < n; ++k) {
+        const mc3_u32 pd = m + word(pkt + k * 4u);
+        const mc3_u32 off = word(pd), q = word(pd + 4u) & 0xFFFFu;
+        if ((off & 15u) || !q) return;
+        l->addr[k] = m + off;
+        l->qwc[k] = (mc3_u16)q;
+        const mc3_u32 handle = word(m + word(mat + k * 4u));
+        const mc3_u32 tex = tex_entry(3u, handle, TEX0);
+        const mc3_u32 slot = tex ? make_slot(3u, tex) : NO_IMAGE;
+        l->slot[k] = (mc3_u16)(slot == NO_IMAGE ? s->white_slot : slot);
+    }
+    l->packets = n;
+    ++s->sky_layers;
+}
+static void step_sky() {
+    State *s = st();
+    if (s->sky_state == 0u) {
+        char path[96];
+        int n = append(path, 0, cpvs_folder());
+        n = append(path, n, cond_time());
+        path[n++] = '_'; path[n] = 0;
+        n = append(path, n, cond_weather());
+        append(path, n, rsc_suffix());
+        const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)(path, STREAM_RAW);
+        if (!h) { s->sky_state = 9u; mark('R','S','K','E', 1u, 0u); return; }
+        const int size = MC3_CALL1(int, STREAM_SIZE, mc3_u32)(h);
+        mc3_u8 *mem = size > 16 && size <= 0x80000 && heap_room((mc3_u32)size + 16u)
+            ? (mc3_u8 *)r_alloc((mc3_u32)size + 16u) : 0;
+        if (!mem) {
+            MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(h);
+            s->sky_state = 9u; mark('R','S','K','E', 2u, (mc3_u32)size); return;
+        }
+        s->sky_stream = h;
+        s->sky = ((mc3_u32)mem + 15u) & ~15u;
+        s->sky_bytes = (mc3_u32)size;
+        s->sky_done = 0u;
+        s->sky_state = 1u;
+        return;
+    }
+    if (s->sky_state != 1u) return;
+    mc3_u32 part = s->sky_bytes - s->sky_done;
+    if (part > CPVS_SLICE) part = CPVS_SLICE;
+    const int ok = read_exact(s->sky_stream, (void *)(s->sky + s->sky_done), part);
+    if (ok) s->sky_done += part;
+    if (ok && s->sky_done < s->sky_bytes) return;
+    MC3_CALL1(void, STREAM_CLOSE, mc3_u32)(s->sky_stream);
+    s->sky_stream = 0u;
+    const mc3_u32 count = ok ? word(s->sky + 4u) : 0u;
+    int valid = ok && word(s->sky) == RSC0 && count && count < 256u && 8u + count * 8u <= s->sky_bytes;
+    for (mc3_u32 i = 0; valid && i < count; ++i) {
+        const mc3_u32 off = word(s->sky + 8u + i * 8u);
+        valid = off >= 8u + count * 8u && off < s->sky_bytes && !(off & 15u);
+    }
+    if (!valid) { s->sky_state = 9u; s->sky = 0u; mark('R','S','K','E', 3u, count); return; }
+    s->sky_count = count;
+    for (mc3_u32 i = 0; i < count; ++i)
+        if (word(s->sky + 12u + i * 8u) == MOD0) load_sky_layer(s->sky + word(s->sky + 8u + i * 8u));
+    s->sky_state = 2u;
+    mark('R','S','K','Y', s->sky_layers, s->sky_bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -1847,12 +2042,10 @@ static int refl_tables() {
 static int build_cpvs_names() {
     State *s = st();
     char path[96];
-    const char *t = mc3_bootarg(MC3_ID('t','i','m','e'));
-    const char *w = mc3_bootarg(MC3_ID('w','e','a','t'));
     int n = append(path, 0, cpvs_folder());
-    n = append(path, n, t && t[0] ? t : default_time());
+    n = append(path, n, cond_time());
     path[n++] = '_'; path[n] = 0;
-    n = append(path, n, w && w[0] ? w : default_weather());
+    n = append(path, n, cond_weather());
     append(path, n, cpvs_rnt_suffix());
     mc3_u32 bytes, mem;
     const mc3_u32 rnt = read_whole(path, 0x200000u, &bytes, &mem);
@@ -1946,7 +2139,7 @@ static __attribute__((noinline)) mc3_u32 pcp_pieces(mc3_u32 index1, const ModelD
         const mc3_u32 at = s->cpvs + p;
         const mc3_u32 lo = word(at), id = (lo >> 28) & 7u, qwc = lo & 0xFFFFu;
         if (id == 3u) {
-            const int t = resolve_ref_target(word(at + 4u), qwc);
+            const int t = (word(at) & REF_RESOLVED) ? -1 : resolve_ref_target(word(at + 4u), qwc);
             for (mc3_u32 j = 0; t >= 0 && j < model->count && j < 4u; ++j)
                 if (model->pieces[j] == (mc3_u32)t) used |= 1u << j;
             p += 16u;
@@ -1998,7 +2191,7 @@ static void cover_components() {
             const mc3_u32 at = s->cpvs + p;
             const mc3_u32 lo = word(at), id = (lo >> 28) & 7u, qwc = lo & 0xFFFFu;
             if (id == 3u) {
-                const int t = resolve_ref_target(word(at + 4u), qwc);
+                const int t = (word(at) & REF_RESOLVED) ? -1 : resolve_ref_target(word(at + 4u), qwc);
                 if (t < 0 || s->targets[t].flags) { ok = 0; break; }
                 mc3_u32 seen = 0;
                 for (mc3_u32 k = 0; k < nc; ++k) if (covered[k] == (mc3_u32)t) seen = 1;
@@ -2180,6 +2373,12 @@ static void load_prop_type(PropType *t) {
     t->cy = fword((const mc3_u32 *)(p + 12u));
     t->cz = fword((const mc3_u32 *)(p + 16u));
     t->radius = fword((const mc3_u32 *)(p + 20u));
+    // PRP0 +0x18: how many lights; the records (MC2's light_data, 0xC0 each)
+    // follow from +0x20 - the entry is 32 + n * 192 bytes
+    t->light_n = word(p + 0x18u);
+    if (t->light_n > 8u) t->light_n = 0u;
+    t->light_rec = p + 0x20u;
+    t->light_data = 0u;
     load_prop_mass(t);
     t->trunk = name_has(t->name, kw_palm()) || name_has(t->name, kw_tree());
     t->ok = 1;
@@ -2191,6 +2390,115 @@ static mc3_u32 find_prop_type(const char *p) {
     for (mc3_u32 i = 0; i < s->prop_type_count; ++i)
         if (name_equal(s->prop_types[i].name, p, 48u)) return i;
     return NO_IMAGE;
+}
+
+// ---------------------------------------------------------------------------
+// MC2 particle parts -> MC3 prop particle rules. An MC2 template names its
+// effects as parts, `name: <template>_particle_<effect>` (newspaper01,
+// firehydrant_l, wood_splinters, steam_p...). MC3 has the same kind of
+// effect on its own props, compiled into the props packs; mc3_prop_ptx.py
+// writes detroit's as tune/effects/<rule>.ptx (their tiles index
+// d_shared_particle, the atlas MC3 loads for cities 5 and 6). FX_* below is
+// the rule list; fx_map() lines are `effect keyword,template keyword,rules`
+// (rules as letters, 'A' = rule 0), first matching line wins.
+// ---------------------------------------------------------------------------
+enum { FX_HYDRANT = 13 };
+static __attribute__((noinline)) const char *fx_rule_names() {
+    static const char s[] =
+        "d_prop_newstand_01x_particle_paper\0"                 // A newspapers
+        "d_prop_trashcan_01x_particle_trash_d\0"               // B trash
+        "d_prop_trashbag_01x_particle_trashbag\0"              // C
+        "d_prop_trashbags_01x_particle_trashbag02\0"           // D
+        "d_prop_dumpster_01x_particle_dumpster_d\0"            // E
+        "d_prop_bench_01x_particle_benchsplinters\0"           // F
+        "d_prop_pallets_01x_particle_splinters\0"              // G
+        "d_prop_alpha_tree_04x_particle_splinters\0"           // H
+        "d_prop_alpha_tree_04x_particle_dust\0"                // I
+        "d_prop_alpha_tree_01x_particle_tree_dead\0"           // J leaves
+        "d_prop_planter_02x_particle_bush_d\0"                 // K
+        "d_prop_mailbox_01x_particle_mail_s\0"                 // L letters
+        "d_prop_parkmeter_01x_particle_coins_d\0"              // M
+        "d_prop_hydrant_01x_particle_hydrant_firehydrant02\0"  // N spray, 10 s
+        "d_prop_steam_01x_particle_steam_t\0"                  // O always on
+        "d_prop_fountain_01x_particle_fountainspray\0"         // P always on
+        "d_prop_telpole_01x_particle_wood\0";                  // Q
+    return s;
+}
+static __attribute__((noinline)) const char *fx_map() {
+    static const char s[] =
+        "newspaper,,A\n"
+        "trashbag02,,D\n"
+        "trashbags,,D\n"
+        "trashbag,,C\n"
+        "trash,dumpster,E\n"
+        "trash,,B\n"
+        "wood_splinters,bench,F\n"
+        "wood_splinters,,G\n"
+        "splinter_tree,,HI\n"
+        "leaf_bush,,K\n"
+        "leaf_tree,,J\n"
+        "mail,,L\n"
+        "letters,,L\n"
+        "coin,,M\n"
+        "firehydrant,,N\n"
+        "steam,,O\n"
+        "smokestack,,O\n"
+        "cherubpee,,P\n"
+        "fountain,,P\n"
+        "sparks,telephone_pole,QI\n";
+    return s;
+}
+static __attribute__((noinline)) const char *kw_particle() { static const char s[] = "_particle_"; return s; }
+static const char *fx_rule_name(mc3_u32 k) {
+    const char *p = fx_rule_names();
+    while (k--) { while (*p) ++p; ++p; }
+    return p;
+}
+static mc3_u32 word_len(const char *s, mc3_u32 max) {
+    mc3_u32 n = 0;
+    while (n < max && s[n] && s[n] != '\r' && s[n] != '\n' && s[n] != ' ' && s[n] != '\t') ++n;
+    return n;
+}
+// s[0..n) contains w[0..wn) (case-insensitive; an empty w always matches)
+static int contains(const char *s, mc3_u32 n, const char *w, mc3_u32 wn) {
+    for (mc3_u32 i = 0; i + wn <= n; ++i) {
+        mc3_u32 k = 0;
+        while (k < wn && lower((mc3_u8)s[i + k]) == (mc3_u32)w[k]) ++k;
+        if (k == wn) return 1;
+    }
+    return 0;
+}
+static void prop_part(PropType *t, const char *part) {
+    const mc3_u32 n = word_len(part, 96u);
+    const char *pk = kw_particle();
+    mc3_u32 at = n;
+    for (mc3_u32 i = 0; i + 10u <= n && at == n; ++i) {
+        mc3_u32 k = 0;
+        while (k < 10u && part[i + k] == pk[k]) ++k;
+        if (k == 10u) at = i + 10u;
+    }
+    if (at >= n) return;
+    const mc3_u32 tn = word_len(t->name, 48u);
+    for (const char *m = fx_map(); *m; ) {
+        const char *kw = m;
+        while (*m != ',') ++m;
+        const mc3_u32 kn = (mc3_u32)(m - kw);
+        const char *tk = ++m;
+        while (*m != ',') ++m;
+        const mc3_u32 tkn = (mc3_u32)(m - tk);
+        const char *rules = ++m;
+        while (*m != '\n') ++m;
+        const mc3_u32 rn = (mc3_u32)(m - rules);
+        ++m;
+        if (!contains(part + at, n - at, kw, kn) || !contains(t->name, tn, tk, tkn)) continue;
+        for (mc3_u32 r = 0; r < rn; ++r) {
+            const mc3_u8 idx = (mc3_u8)(rules[r] - 'A');
+            int dup = 0;
+            for (mc3_u32 j = 0; j < t->fx_count; ++j) dup |= t->fx[j] == idx;
+            if (!dup && t->fx_count < 4u) t->fx[t->fx_count++] = idx;
+        }
+        return;
+    }
 }
 
 // losangeles.prop, one line at a time (the .hood reader, mode 2).
@@ -2213,12 +2521,16 @@ static void prop_line(const char *p) {
             t->name[n] = 0;
             t->far = 0;
             t->fixed_object = t->gfx_only = t->drivable = 0;
+            t->fx_count = t->fx_always = 0;
             load_prop_type(t);
             return;
         }
-        // placement: the matrix came first
+        // placement: the matrix came first. A template without a model is
+        // kept when it has particles (steam vents, fountains): nothing is
+        // drawn for it, the particles are.
         const mc3_u32 type = find_prop_type(q);
-        if (hd->rows != 4 || type == NO_IMAGE || !s->prop_types[type].ok ||
+        if (hd->rows != 4 || type == NO_IMAGE ||
+            (!s->prop_types[type].ok && !s->prop_types[type].fx_count) ||
             s->prop_count >= MAX_PROPS) { ++s->prop_bad; hd->rows = 0; return; }
         const PropType *t = &s->prop_types[type];
         const mc3_u32 i = s->prop_count++;
@@ -2241,6 +2553,12 @@ static void prop_line(const char *p) {
         if (starts(p, kw_fixed())) { last->fixed_object = p[12] == ' ' ? p[13] == '1' : p[12] == '1'; return; }
         if (starts(p, kw_gfx())) { last->gfx_only = p[8] == ' ' ? p[9] == '1' : p[8] == '1'; return; }
         if (starts(p, kw_drivable())) { last->drivable = p[9] == ' ' ? p[10] == '1' : p[9] == '1'; return; }
+        if (starts(p, kw_name())) {
+            const char *q = p + 5;
+            while (*q == ' ' || *q == '\t') ++q;
+            prop_part(last, q);
+            return;
+        }
     }
     if (starts(p, kw_far()) && s->prop_type_count && !hd->in_inst) {
         const char *q = p + 4;
@@ -2260,10 +2578,9 @@ static void step_props() {
     Hood *hd = &s->hood;
     if (s->prop_state == 0u) {
         char path[96];
-        const char *t = mc3_bootarg(MC3_ID('t','i','m','e'));
         int n = append(path, 0, cpvs_folder());
         n = append(path, n, amb_prefix());
-        n = append(path, n, t && t[0] ? t : default_time());
+        n = append(path, n, cond_time());
         const int stem = n;
         append(path, n, rnt_suffix());
         mc3_u32 bytes, mem;
@@ -2401,6 +2718,423 @@ static void push_car_out(float nx, float nz, const float *vel) {
     MC3_CALL3(void, 0x003FC600, mc3_u32, mc3_u32, mc3_u32)
         ((mc3_u32)&s->push_brain[0], (mc3_u32)m, (mc3_u32)v);
 }
+// ---------------------------------------------------------------------------
+// MC3's prop particles on the MC2 props: the rules the retail props use
+// (fx_rule_names), thrown by the game's own prop particle system,
+// mcPropManager::s_pSwPtx - a swPropPtxSystem of 256 particles that mcSwPtx
+// updates and draws with every other effect, in every city (mcLayerCity::Load
+// creates it). What mcPropFixed::EmitParticles 0x390B38 does per rule:
+// count = AdjustPropEmissionCount(m_emitRate), position = m_position through
+// the prop's matrix, BlastTransformed(system, position, count, matrix, rule).
+//
+// A rule is an mcPropParticleBirthRule (0x190 bytes): built here in our own
+// memory (ctor 0x38FFC8, name at +4, parFileIO::Load 0x55F3D8 reads
+// tune/effects/<name>.ptx) rather than through LoadWithHash, whose global
+// hash would keep pointers into this city's heap after we leave. Every
+// particle points at its rule, so release_all resets the system (all
+// particles dead) before the rules go. Texture: SetTexture(rule, the
+// system's atlas, 8, 8), like mcPropType::LoadTypeData.
+//
+// Hits: a movable prop (hit_prop) or a solid one (pole, tree trunk; once per
+// prop until another is hit or 1.5 s pass) throws its rules that are not
+// always on, when the impact (speed x 1500 kg) reaches m_minForceToSpawn.
+// m_sprayAfterBroken (hydrant) keeps spraying m_spewTimeLimit seconds where
+// it stood. m_alwaysOn (steam vents, fountains) emit every frame within
+// 70 m of the camera, at most FX_AMBIENT_PER_FRAME of them.
+// [boot] mc2f = 0 turns all of it off (mc2x/y/z together place the camera).
+// Markers RPFX (rules), RPFB (blasts).
+// ---------------------------------------------------------------------------
+enum {
+    PROP_PTX_SYSTEM = 0x00617F6C,        // mcPropManager::s_pSwPtx
+    PROP_PTX_TEXTURE = 0x00617F70,       // mcPropManager::s_pPropParticleTex
+    BIRTH_RULE_CTOR = 0x0038FFC8,
+    PARFILEIO_LOAD = 0x0055F3D8,
+    BIRTH_SET_TEXTURE = 0x001EFB08,
+    PTX_BLAST_TRANSFORMED = 0x001F42D8,
+    PTX_RESET = 0x001F4538,
+    FX_ASSET_MANAGER = 0x006D557C,
+    BIRTH_RULE_BYTES = 0x190,
+    RULE_LIFE = 80, RULE_SPRAY = 0x161, RULE_MIN_FORCE = 0x168, RULE_ALWAYS = 0x170,
+    RULE_POSITION = 0x178, RULE_SPEW = 0x184, RULE_EMIT = 0x188,
+    RULE_COLORS = 176, RULE_AMBIENT = 0x163, RULE_EMISSIVE = 0x16C,
+    MC_CITY = 0x00615B40, MC_CITY_AMBIENT = 0xE0,
+    PTX_HYDRANT_FLAG = 52,               // copied into each particle (+49)
+    FX_AMBIENT_PER_FRAME = 6
+};
+static int fx_enabled() {
+    const char *value = mc3_bootarg(MC3_ID('m','c','2','f'));
+    return !value || value[0] != '0';
+}
+static __attribute__((noinline)) const char *assets_root() { static const char s[] = "$/"; return s; }
+static mc3_u8 byte_at(mc3_u32 p) { return *(volatile mc3_u8 *)p; }
+// mcPropType::AdjustPropEmissionCount without its divide trap: counts of 3
+// and up are divided by the race's particle divisor (race config +80).
+static mc3_u32 fx_count(mc3_u32 rule) {
+    const int n = (int)fword((const mc3_u32 *)(rule + RULE_EMIT));
+    if (n < 3) return n > 0 ? (mc3_u32)n : 1u;
+    const mc3_u32 cfg = word(RACE_CONFIG_CURRENT);
+    int div = ptr(cfg) ? (int)word(cfg + 80u) : 1;
+    if (div <= 0) div = 1;
+    return n / div > 0 ? (mc3_u32)(n / div) : 1u;
+}
+static void fx_emit(mc3_u32 rule, const float *m, mc3_u32 count, int hydrant) {
+    const mc3_u32 sys = word(PROP_PTX_SYSTEM);
+    if (!ptr(sys) || !rule || !count) return;
+    float mat[12] __attribute__((aligned(16)));
+    float pos[4] __attribute__((aligned(16)));
+    for (int r = 0; r < 4; ++r)
+        for (int k = 0; k < 3; ++k) mat[r * 3 + k] = m[r * 4 + k];
+    const float *lp = (const float *)(rule + RULE_POSITION);
+    for (int k = 0; k < 3; ++k) pos[k] = lp[0] * m[k] + lp[1] * m[4 + k] + lp[2] * m[8 + k] + m[12 + k];
+    pos[3] = ffrom(0u);
+    // Always written: the system is built with this byte 0xCD (debug fill)
+    // and only EmitParticles ever clears it. Set, the particles stop on any
+    // car within 3 m (Update 0x1F3850) - newspapers thrown by the player's
+    // own hit stuck under the car, invisible.
+    *(volatile mc3_u8 *)(sys + PTX_HYDRANT_FLAG) = hydrant ? 1u : 0u;
+    // m_bRecieveAmbientLighting: the birth/death colours times the city's
+    // ambient (mcCity +0xE0), lifted towards white by m_emissive, only for
+    // this blast - as EmitParticles does (its nearest-light term is left out:
+    // the MC2 city's lights are not mcLights). Without it newspapers glow
+    // white at midnight.
+    float *col = (float *)(rule + RULE_COLORS);
+    float keep[8];
+    const mc3_u32 city = word(MC_CITY);
+    const int lit = byte_at(rule + RULE_AMBIENT) && ptr(city);
+    if (lit) {
+        const float e = fword((const mc3_u32 *)(rule + RULE_EMISSIVE));
+        for (int k = 0; k < 8; ++k) keep[k] = col[k];
+        for (int k = 0; k < 3; ++k) {
+            float a = fword((const mc3_u32 *)(city + MC_CITY_AMBIENT + 4u * k));
+            if (a > ffrom(0x3F800000u)) a = ffrom(0x3F800000u);
+            if (a < ffrom(0u)) a = ffrom(0u);
+            a += (ffrom(0x3F800000u) - a) * e;
+            col[k] *= a; col[4 + k] *= a;
+        }
+    }
+    MC3_CALL5(void, PTX_BLAST_TRANSFORMED, mc3_u32, mc3_u32, int, mc3_u32, mc3_u32)
+        (sys, (mc3_u32)pos, (int)count, (mc3_u32)mat, rule);
+    if (lit) for (int k = 0; k < 8; ++k) col[k] = keep[k];
+    *(volatile mc3_u8 *)(sys + PTX_HYDRANT_FLAG) = 0u;
+    ++st()->fx_blasts;
+}
+// The rules the city's props use, once the props are read.
+static void fx_load_rules() {
+    State *s = st();
+    const mc3_u32 sys = word(PROP_PTX_SYSTEM), tex = word(PROP_PTX_TEXTURE);
+    if (!ptr(sys) || !ptr(tex)) return;                 // not yet: try next frame
+    s->fx_state = 9u;                                   // one attempt, whatever happens
+    mc3_u32 used = 0, n = 0;
+    for (mc3_u32 i = 0; i < s->prop_type_count; ++i)
+        for (mc3_u32 j = 0; j < s->prop_types[i].fx_count; ++j) used |= 1u << s->prop_types[i].fx[j];
+    for (mc3_u32 k = 0; k < FX_RULE_COUNT; ++k) n += (used >> k) & 1u;
+    if (!n || !heap_room(n * BIRTH_RULE_BYTES + 64u)) { mark('R','P','F','X', used, 0xFFFFFFFFu); return; }
+    mc3_u8 *mem = (mc3_u8 *)r_alloc(n * BIRTH_RULE_BYTES + 32u);
+    if (!mem) return;
+    s->fx_mem = (mc3_u32)mem;
+    mc3_u32 at = ((mc3_u32)mem + 15u) & ~15u, loaded = 0;
+    const mc3_u32 assets = word(FX_ASSET_MANAGER);
+    const mc3_u32 vt = ptr(assets) ? word(assets) : 0u;
+    if (vt) MC3_CALL2(void, word(vt + 0x10u), mc3_u32, const char *)(assets, assets_root());
+    for (mc3_u32 k = 0; k < FX_RULE_COUNT; ++k) {
+        if (!((used >> k) & 1u)) continue;
+        for (mc3_u32 b = 0; b < BIRTH_RULE_BYTES; b += 4u) *(volatile mc3_u32 *)(at + b) = 0u;
+        MC3_CALL1(void, BIRTH_RULE_CTOR, mc3_u32)(at);
+        *(volatile mc3_u32 *)(at + 4u) = (mc3_u32)fx_rule_name(k);
+        MC3_CALL1(int, PARFILEIO_LOAD, mc3_u32)(at);
+        // a missing file leaves the defaults (life 0): no such rule
+        if (fword((const mc3_u32 *)(at + RULE_LIFE)) > ffrom(0u)) {
+            MC3_CALL4(void, BIRTH_SET_TEXTURE, mc3_u32, mc3_u32, int, int)(at, tex, 8, 8);
+            s->fx_rules[k] = at;
+            loaded |= 1u << k;
+        }
+        at += BIRTH_RULE_BYTES;
+    }
+    if (vt) MC3_CALL1(void, word(vt + 0x14u), mc3_u32)(assets);
+    s->fx_sys = sys;
+    s->fx_tex = tex;
+    for (mc3_u32 i = 0; i < s->prop_type_count; ++i) {
+        PropType *t = &s->prop_types[i];
+        for (mc3_u32 j = 0; j < t->fx_count; ++j) {
+            const mc3_u32 r = s->fx_rules[t->fx[j]];
+            if (r && byte_at(r + RULE_ALWAYS)) t->fx_always = 1u;
+        }
+    }
+    for (mc3_u32 i = 0; i < s->prop_count && s->fx_ambient_count < MAX_FX_AMBIENT; ++i)
+        if (s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]].fx_always)
+            s->fx_ambient[s->fx_ambient_count++] = (mc3_u16)i;
+    mark('R','P','F','X', used, loaded);
+    mark('R','P','F','2', s->fx_ambient_count, tex);
+}
+static void fx_on_hit(mc3_u32 i, const float *m, float speed) {
+    State *s = st();
+    if (s->fx_state != 9u || !fx_enabled()) return;
+    const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+    const float force = speed * ffrom(0x44BB8000u);            // x 1500 kg
+    for (mc3_u32 j = 0; j < t->fx_count; ++j) {
+        const mc3_u32 rule = s->fx_rules[t->fx[j]];
+        if (!rule || byte_at(rule + RULE_ALWAYS)) continue;
+        if (force < fword((const mc3_u32 *)(rule + RULE_MIN_FORCE))) continue;
+        if (byte_at(rule + RULE_SPRAY)) {
+            for (mc3_u32 k = 0; k < MAX_SPOUTS; ++k) {
+                FxSpout *sp = &s->spouts[k];
+                if (sp->left > ffrom(0u)) continue;
+                sp->rule = rule;
+                sp->left = fword((const mc3_u32 *)(rule + RULE_SPEW));
+                for (int e = 0; e < 16; ++e) sp->m[e] = m[e];
+                break;
+            }
+            continue;
+        }
+        fx_emit(rule, m, fx_count(rule), t->fx[j] == FX_HYDRANT);
+    }
+    mark('R','P','F','B', i | ((mc3_u32)t->fx_count << 24), s->fx_blasts);
+}
+static void step_prop_fx() {
+    State *s = st();
+    if (s->fx_state == 0u) { fx_load_rules(); return; }
+    if (s->fx_state != 9u || !s->fx_mem || !fx_enabled()) return;
+    ++s->fx_frame;
+    // the city was reloaded under us (restart): same rules, the new atlas
+    const mc3_u32 sys = word(PROP_PTX_SYSTEM), tex = word(PROP_PTX_TEXTURE);
+    if (!ptr(sys) || !ptr(tex)) return;
+    if (sys != s->fx_sys || tex != s->fx_tex) {
+        for (mc3_u32 k = 0; k < FX_RULE_COUNT; ++k)
+            if (s->fx_rules[k]) MC3_CALL4(void, BIRTH_SET_TEXTURE, mc3_u32, mc3_u32, int, int)(s->fx_rules[k], tex, 8, 8);
+        for (mc3_u32 k = 0; k < MAX_SPOUTS; ++k) s->spouts[k].left = ffrom(0u);
+        s->fx_sys = sys; s->fx_tex = tex;
+    }
+    if (!s->camera) return;
+    const float cam_x = fword((const mc3_u32 *)(s->camera + 36u));
+    const float cam_y = fword((const mc3_u32 *)(s->camera + 40u));
+    const float cam_z = fword((const mc3_u32 *)(s->camera + 44u));
+    const float near2 = ffrom(0x45992000u);                   // 70^2
+    const float dt = ffrom(0x3D088889u);
+    for (mc3_u32 k = 0; k < MAX_SPOUTS; ++k) {
+        FxSpout *sp = &s->spouts[k];
+        if (sp->left <= ffrom(0u)) continue;
+        sp->left -= dt;
+        const float dx = sp->m[12] - cam_x, dy = sp->m[13] - cam_y, dz = sp->m[14] - cam_z;
+        if (dx * dx + dy * dy + dz * dz > near2 * ffrom(0x40000000u)) continue;
+        fx_emit(sp->rule, sp->m, fx_count(sp->rule), 1);
+    }
+    mc3_u32 done = 0;
+    for (mc3_u32 a = 0; a < s->fx_ambient_count && done < FX_AMBIENT_PER_FRAME; ++a) {
+        const mc3_u32 i = s->fx_ambient[a];
+        const float *m = (const float *)(s->prop_matrices + i * 64u);
+        const float dx = m[12] - cam_x, dy = m[13] - cam_y, dz = m[14] - cam_z;
+        if (dx * dx + dy * dy + dz * dz > near2) continue;
+        const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+        for (mc3_u32 j = 0; j < t->fx_count; ++j) {
+            const mc3_u32 rule = s->fx_rules[t->fx[j]];
+            if (rule && byte_at(rule + RULE_ALWAYS)) fx_emit(rule, m, fx_count(rule), 0);
+        }
+        ++done;
+    }
+}
+// ---------------------------------------------------------------------------
+// MC2's prop lights as MC3 lights. An MC2 prop's lights are compiled into its
+// PRP0 (ambients_<time>.rsc): +0x18 count, then 0xC0-byte records from +0x20
+// holding exactly MC2's tune/lightdata/<prop>_<n>.light_data - checked field
+// by field on l_prop_streetlight_01x:
+//   +0x0C type  +0x10 position  +0x20 color  +0x30 intensity  +0x34 decay_rate
+//   +0x38 direction  +0x44 spot_angle  +0x48 spot_dropoff  +0x4C draw_glow
+//   +0x50 glow_offset  +0x60 glow_color  +0x70 draw_cone  +0x74 cone_size
+//   +0x78 cone_intensity  +0x7C cone_offset  +0x80 cone_color  +0x90 draw_flare
+//   +0x94 flare_offset  +0xA0 flare_color  +0xB0 reflection_color
+// MC3's mcLightData (176 bytes, parFileIO, FileIO 0x595B18) has the same
+// fields by the same names - it is the same class a version later - so each
+// record becomes one: ctor 0x5958E8, then the fields at MC3's offsets, local
+// position +0x18 and direction +0x24 as mcLightData::Init would put them.
+// Each placed prop then gets MC3's mcLight (36 bytes, 48 here): the init
+// 0x259988(light, Matrix34, data) that mcPropLightData::CreateLights uses
+// (world position/direction from the prop's matrix, flags 5 = on), and
+// mcLightManager::AddLightToGrid, so the grid MC3 lights cars and particles
+// with (GetClosestLights) has them. Every frame, the lights within 160 m of
+// the camera go through what mcPropType::Render does with a prop's lights -
+// 0x259FF0 (glow, cone, flare into mcGlow's buffers, pass 512) and 0x25A1F8
+// (the reflection on the road, pass 4; $f12 = the prop's ground height) -
+// both only buffer, mcGlow draws them in its passes. A knocked-down lamp
+// goes dark (flag 4 off). [boot] mc2l = 0: no lights. Markers RLGT
+// <templates' lights << 16 | placed> <manager>, RLGD <drawn this frame>.
+// ---------------------------------------------------------------------------
+enum {
+    LIGHT_MANAGER = 0x0070FA4C,
+    LIGHTDATA_CTOR = 0x005958E8,
+    LIGHT_INIT = 0x00259988,
+    LIGHT_ADD = 0x00259658,
+    LIGHT_REMOVE = 0x00259610,
+    LIGHT_GLOW = 0x00259FF0,
+    LIGHT_REFLECT = 0x0025A1F8,
+    LIGHTDATA_BYTES = 176, LIGHT_BYTES = 48, MAX_LIGHTS_PLACED = 6144, LIGHTS_PER_FRAME = 48
+};
+static int lights_enabled() {
+    const char *value = mc3_bootarg(MC3_ID('m','c','2','l'));
+    return !value || value[0] != '0';
+}
+static void put_u32(mc3_u32 at, mc3_u32 v) { *(volatile mc3_u32 *)at = v; }
+// 0x25A1F8(light) takes the ground height in $f12 (the game's EABI: floats
+// in $f12 on). This toolchain would put a float second argument in $f13, so
+// the call is made by hand.
+static void light_reflect(mc3_u32 light, float ground) {
+    register mc3_u32 a0 __asm__("$4") = light;
+    register float f12 __asm__("$f12") = ground;
+    __asm__ volatile(
+        "lui $25, 0x0025\n\t"
+        "ori $25, $25, 0xA1F8\n\t"
+        "jalr $25\n\t"
+        "nop"
+        : "+r"(a0), "+f"(f12)
+        :
+        : "$2", "$3", "$5", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14",
+          "$15", "$24", "$25", "$31", "$f0", "$f1", "$f2", "$f3", "$f4", "$f5", "$f6",
+          "$f7", "$f8", "$f9", "$f10", "$f11", "$f13", "$f14", "$f15", "$f16", "$f17",
+          "$f18", "$f19", "memory");
+}
+static void copy_words(mc3_u32 to, mc3_u32 from, mc3_u32 n) {
+    for (mc3_u32 k = 0; k < n; ++k) put_u32(to + 4u * k, word(from + 4u * k));
+}
+static void light_data_from_mc2(mc3_u32 d, mc3_u32 r, const char *name) {
+    for (mc3_u32 b = 0; b < LIGHTDATA_BYTES; b += 4u) put_u32(d + b, 0u);
+    MC3_CALL1(void, LIGHTDATA_CTOR, mc3_u32)(d);
+    put_u32(d + 0x04u, (mc3_u32)name);
+    put_u32(d + 0x0Cu, word(r + 0x0Cu));                     // type
+    put_u32(d + 0x10u, word(r + 0x30u));                     // intensity
+    copy_words(d + 0x18u, r + 0x10u, 3u);                    // position (local)
+    copy_words(d + 0x24u, r + 0x38u, 3u);                    // direction (local)
+    copy_words(d + 0x30u, r + 0x20u, 3u);                    // color
+    put_u32(d + 0x3Cu, 0x3F800000u);
+    copy_words(d + 0x40u, r + 0x60u, 4u);                    // glow_color
+    copy_words(d + 0x50u, r + 0x80u, 4u);                    // cone_color
+    copy_words(d + 0x60u, r + 0xA0u, 4u);                    // flare_color
+    copy_words(d + 0x70u, r + 0xB0u, 4u);                    // reflection_color
+    *(volatile mc3_u8 *)(d + 0x80u) = 0u;                    // not flashing, not directional
+    *(volatile mc3_u8 *)(d + 0x81u) = word(r + 0x4Cu) != 0u; // draw_glow
+    *(volatile mc3_u8 *)(d + 0x82u) = word(r + 0x70u) != 0u; // draw_cone
+    *(volatile mc3_u8 *)(d + 0x83u) = word(r + 0x90u) != 0u; // draw_flare
+    put_u32(d + 0x84u, word(r + 0x34u));                     // decay_rate
+    put_u32(d + 0x88u, word(r + 0x44u));                     // spot_angle
+    put_u32(d + 0x8Cu, word(r + 0x48u));                     // spot_dropoff
+    put_u32(d + 0x90u, word(r + 0x50u));                     // glow_offset
+    put_u32(d + 0x94u, word(r + 0x74u));                     // cone_size
+    put_u32(d + 0x98u, word(r + 0x78u));                     // cone_intensity
+    put_u32(d + 0x9Cu, word(r + 0x7Cu));                     // cone_offset
+    put_u32(d + 0xA0u, word(r + 0x94u));                     // flare_offset
+}
+static void lights_init() {
+    State *s = st();
+    const mc3_u32 mgr = word(LIGHT_MANAGER);
+    if (!ptr(mgr) || !ptr(word(mgr))) return;                // not yet: next frame
+    s->light_state = 9u;
+    mc3_u32 datas = 0, placed = 0;
+    for (mc3_u32 i = 0; i < s->prop_type_count; ++i)
+        if (s->prop_types[i].ok) datas += s->prop_types[i].light_n;
+    for (mc3_u32 i = 0; i < s->prop_count; ++i) {
+        const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+        if (t->ok) placed += t->light_n;
+    }
+    if (placed > MAX_LIGHTS_PLACED) placed = MAX_LIGHTS_PLACED;
+    const mc3_u32 bytes = datas * LIGHTDATA_BYTES + placed * (LIGHT_BYTES + 2u) + 64u;
+    if (!datas || !placed || !heap_room(bytes)) { mark('R','L','G','X', datas, placed); return; }
+    mc3_u8 *mem = (mc3_u8 *)r_alloc(bytes);
+    if (!mem) return;
+    mc3_u32 at = ((mc3_u32)mem + 15u) & ~15u;
+    for (mc3_u32 i = 0; i < s->prop_type_count; ++i) {
+        PropType *t = &s->prop_types[i];
+        if (!t->ok || !t->light_n) continue;
+        t->light_data = at;
+        for (mc3_u32 k = 0; k < t->light_n; ++k)
+            light_data_from_mc2(at + k * LIGHTDATA_BYTES, t->light_rec + k * 0xC0u, t->name);
+        at += t->light_n * LIGHTDATA_BYTES;
+    }
+    s->light_objs = at;
+    s->light_props = at + placed * LIGHT_BYTES;
+    mc3_u32 n = 0;
+    float mat[12] __attribute__((aligned(16)));
+    for (mc3_u32 i = 0; i < s->prop_count && n < placed; ++i) {
+        const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+        if (!t->ok || !t->light_n) continue;
+        const float *m = (const float *)(s->prop_matrices + i * 64u);
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 3; ++k) mat[r * 3 + k] = m[r * 4 + k];
+        for (mc3_u32 k = 0; k < t->light_n && n < placed; ++k, ++n) {
+            const mc3_u32 l = s->light_objs + n * LIGHT_BYTES;
+            for (mc3_u32 b = 0; b < LIGHT_BYTES; b += 4u) put_u32(l + b, 0u);
+            MC3_CALL3(void, LIGHT_INIT, mc3_u32, mc3_u32, mc3_u32)(l, (mc3_u32)mat, t->light_data + k * LIGHTDATA_BYTES);
+            MC3_CALL2(void, LIGHT_ADD, mc3_u32, mc3_u32)(mgr, l);
+            ((mc3_u16 *)s->light_props)[n] = (mc3_u16)i;
+        }
+    }
+    s->light_count = n;
+    s->light_mgr = mgr;
+    mark('R','L','G','T', (datas << 16) | n, mgr);
+}
+static void step_lights() {
+    State *s = st();
+    if (s->light_state == 0u) { lights_init(); return; }
+    if (s->light_state != 9u || !s->light_count || !lights_enabled() || !ptr(s->camera)) return;
+    const mc3_u32 mgr = word(LIGHT_MANAGER);
+    if (!ptr(mgr) || !ptr(word(mgr))) return;
+    if (mgr != s->light_mgr) {             // the city was reloaded (restart): a new, empty grid
+        for (mc3_u32 n = 0; n < s->light_count; ++n) {
+            const mc3_u32 l = s->light_objs + n * LIGHT_BYTES;
+            put_u32(l + 12u, 0u);
+            *(volatile mc3_u16 *)(l + 32u) = 0xFFFFu;
+            MC3_CALL2(void, LIGHT_ADD, mc3_u32, mc3_u32)(mgr, l);
+        }
+        s->light_mgr = mgr;
+    }
+    const float cam_x = fword((const mc3_u32 *)(s->camera + 36u));
+    const float cam_y = fword((const mc3_u32 *)(s->camera + 40u));
+    const float cam_z = fword((const mc3_u32 *)(s->camera + 44u));
+    // Only what mcPropType::Render would reach: lights of props in view (the
+    // sphere spans lamp to ground, where the reflection lies), within 120 m,
+    // at most LIGHTS_PER_FRAME. Every lamp within 160 m, in view or not, cost
+    // the frame its 30 fps on Hollywood's avenues: 120 renderer frames took
+    // up to 4.79 s instead of 4.00 there (4.25 with mc2l = 0), and a frame
+    // held for a third vblank flips the interlaced field - the fast flicker
+    // that neither screenshots nor PCSX2's video capture show (player).
+    const float near2 = ffrom(0x46610000u);                   // 120^2
+    mc3_u32 drawn = 0;
+    for (mc3_u32 n = 0; n < s->light_count && drawn < LIGHTS_PER_FRAME; ++n) {
+        const mc3_u32 l = s->light_objs + n * LIGHT_BYTES;
+        const mc3_u32 prop = ((const mc3_u16 *)s->light_props)[n];
+        if (s->prop_moved[prop]) {                            // knocked down: dark
+            *(volatile mc3_u8 *)(l + 34u) &= (mc3_u8)~4u;
+            continue;
+        }
+        const float *p = (const float *)l;
+        const float dx = p[0] - cam_x, dy = p[1] - cam_y, dz = p[2] - cam_z;
+        if (dx * dx + dy * dy + dz * dz > near2) continue;
+        const float ground = ((const float *)(s->prop_matrices + prop * 64u))[13];
+        const float half = (p[1] - ground) * ffrom(0x3F000000u);
+        if (!sphere_visible(p[0], ground + half, p[2], (half < ffrom(0u) ? -half : half) + ffrom(0x40800000u)))
+            continue;
+        MC3_CALL1(void, LIGHT_GLOW, mc3_u32)(l);
+        light_reflect(l, ground);
+        ++drawn;
+    }
+    s->lights_drawn = drawn;
+}
+// Leaving the city: our lights out of MC3's grid while it is still the same one.
+static void lights_release() {
+    State *s = st();
+    if (!s || !s->light_count || !ptr(s->light_mgr) || word(LIGHT_MANAGER) != s->light_mgr) return;
+    for (mc3_u32 n = 0; n < s->light_count; ++n) {
+        const mc3_u32 l = s->light_objs + n * LIGHT_BYTES;
+        if (*(volatile mc3_u16 *)(l + 32u) != 0xFFFFu)
+            MC3_CALL2(void, LIGHT_REMOVE, mc3_u32, mc3_u32)(s->light_mgr, l);
+    }
+    s->light_count = 0u;
+}
+// Leaving the city: no particle may point at our rules any more.
+static void fx_release() {
+    State *s = st();
+    if (!s || !s->fx_mem) return;
+    const mc3_u32 sys = word(PROP_PTX_SYSTEM);
+    if (ptr(sys) && sys == s->fx_sys) MC3_CALL1(void, PTX_RESET, mc3_u32)(sys);
+    s->fx_mem = 0u;
+}
 static void hit_prop(mc3_u32 i, float *car_vel, float speed) {
     State *s = st();
     const mc3_u32 *rec = (const mc3_u32 *)(s->prop_records + i * 20u);
@@ -2408,6 +3142,7 @@ static void hit_prop(mc3_u32 i, float *car_vel, float speed) {
     DynProp *d = &s->dyn[s->dyn_next];
     s->dyn_next = (s->dyn_next + 1u) % MAX_DYN_PROPS;   // oldest slot: that prop stays where it lies
     float *m = (float *)(s->prop_matrices + i * 64u);
+    fx_on_hit(i, m, speed);
     const float inv = ffrom(0x3F800000u) / speed;
     const float dx = car_vel[0] * inv, dz = car_vel[2] * inv;
     const float k = ffrom(0x40000000u) * ffrom(0x44BB8000u) / (ffrom(0x44BB8000u) + t->mass) * ffrom(0x3F333333u);
@@ -2437,10 +3172,17 @@ static void hit_prop(mc3_u32 i, float *car_vel, float speed) {
 }
 // [boot] mc2h = 1 (diagnostic): at the start line, line up the three movable
 // props nearest to the car 12, 20 and 28 m ahead of it, to drive into.
+// mc2h = 2 (particles): the nearest prop throwing the hydrant spray, the
+// nearest steam vent and the nearest one throwing trash, in that order.
+static int has_fx(const PropType *t, mc3_u32 rule) {
+    for (mc3_u32 j = 0; j < t->fx_count; ++j) if (t->fx[j] == rule) return 1;
+    return 0;
+}
 static void line_up_test_props(const float *cp) {
     State *s = st();
     const char *v = mc3_bootarg(MC3_ID('m','c','2','h'));
-    if (!v || v[0] != '1' || s->props_hit || s->dyn_next) return;
+    if (!v || (v[0] != '1' && v[0] != '2') || s->props_hit || s->dyn_next) return;
+    if (v[0] == '2' && s->fx_state != 9u) return;           // wait for the rules
     // forward = -row 2 of the car's Matrix34 (rows of three floats; cp is row 3)
     const float fx = -cp[-3], fz = -cp[-1];
     mc3_u32 used[3] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
@@ -2449,6 +3191,10 @@ static void line_up_test_props(const float *cp) {
         for (mc3_u32 i = 0; i < s->prop_count; ++i) {
             if (i == used[0] || i == used[1]) continue;
             const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+            if (v[0] == '2') {
+                const mc3_u32 want = k == 0 ? FX_HYDRANT : k == 1 ? 14u : 1u;
+                if (!has_fx(t, want)) continue;
+            } else
             if (t->gfx_only || !t->has_phys || t->fixed || t->fixed_object || t->drivable) continue;
             const float *m = (const float *)(s->prop_matrices + i * 64u);
             const float dx = m[12] - cp[0], dz = m[14] - cp[2], d2 = dx * dx + dz * dz;
@@ -2458,6 +3204,7 @@ static void line_up_test_props(const float *cp) {
         float *m = (float *)(s->prop_matrices + used[k] * 64u);
         const float dist = ffrom(0x41400000u) + ffrom(0x41000000u) * (float)k;   // 12, 20, 28
         m[12] = cp[0] + fx * dist; m[13] = cp[1]; m[14] = cp[2] + fz * dist;
+        if (v[0] == '2' && k == 1) { m[12] -= fz * ffrom(0x40800000u); m[14] += fx * ffrom(0x40800000u); }  // 4 m aside
         float *rec = (float *)(s->prop_records + used[k] * 20u);
         rec[0] = m[12]; rec[1] = m[13]; rec[2] = m[14];
         mark('R','P','L','U', used[k], ((const mc3_u32 *)(s->prop_records + used[k] * 20u))[4]);
@@ -2518,6 +3265,11 @@ static void step_prop_physics() {
                         // inside the trunk: back to its edge (0.95 r deep or more)
                         const float out = (r - dl2) / dl2;
                         push_car_out(cp[0] - dx * out, cp[2] - dz * out, cv);
+                    }
+                    if (i != s->fx_last_solid || s->fx_frame - s->fx_last_frame > 45u) {
+                        fx_on_hit(i, m, speed);
+                        s->fx_last_solid = i;
+                        s->fx_last_frame = s->fx_frame;
                     }
                     if (s->solid_hits++ < 40u) {
                         mark('R','P','S','O', i | (((const mc3_u32 *)(s->prop_records + i * 20u))[4] << 16), fbits(speed));
@@ -2619,17 +3371,24 @@ static int cards_enabled() {
     const char *v = mc3_bootarg(MC3_ID('m','c','2','k'));
     return !v || v[0] != '0';
 }
+// How far the cards are drawn: [boot] mc2k = N (metres, 10 and up), default
+// 200. Drawn out to the city's radius, the shop-window glows of a whole
+// avenue showed at once, far down the street (player, 2026-09-30).
+static float card_distance() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','k'));
+    mc3_u32 n = 0;
+    while (v && *v >= '0' && *v <= '9') n = n * 10u + (mc3_u32)(*v++ - '0');
+    return n >= 10u && n <= 2000u ? (float)n : 200.0f;
+}
 static void step_cpvs() {
     State *s = st();
     mc3_u8 scratch[2048] __attribute__((aligned(16)));
     if (s->cpvs_state == 0u) {
         char path[96];
-        const char *t = mc3_bootarg(MC3_ID('t','i','m','e'));
-        const char *w = mc3_bootarg(MC3_ID('w','e','a','t'));
         int n = append(path, 0, cpvs_folder());
-        n = append(path, n, t && t[0] ? t : default_time());
+        n = append(path, n, cond_time());
         path[n++] = '_'; path[n] = 0;
-        n = append(path, n, w && w[0] ? w : default_weather());
+        n = append(path, n, cond_weather());
         append(path, n, cpvs_suffix());
         const mc3_u32 h = MC3_CALL2(mc3_u32, STREAM_OPEN, const char *, int)
             (path, STREAM_RAW);
@@ -2845,8 +3604,20 @@ static int queue_pcp(mc3_u32 index, mc3_u32 arena) {
             const mc3_u32 lo = word(at), addr = word(at + 4u);
             const mc3_u32 id = (lo >> 28) & 7u, qwc = lo & 0xFFFFu;
             if (id == 3u) {                                  // ref
-                const mc3_u32 src = resolve_ref(addr, qwc);
-                if (!src) return 0;
+                // resolved once, then kept in the tag: the address replaces
+                // MC2's handle and bit 24 of the tag's low word (always 0 in
+                // MC2's tags; every reader takes only qwc and id) says so.
+                // ~10 000 refs looked up again every frame cost the frame.
+                // (Bit 31 of the handle could not be the flag: it holds a
+                // 12-bit index + 1, so indices from 2048 on set it.)
+                mc3_u32 src;
+                if (lo & REF_RESOLVED) src = addr;
+                else {
+                    src = resolve_ref(addr, qwc);
+                    if (!src) return 0;
+                    *(volatile mc3_u32 *)(at + 4u) = src;
+                    *(volatile mc3_u32 *)at = lo | REF_RESOLVED;
+                }
                 if (pass) queue_ref(src, qwc, word(at + 8u), word(at + 12u));
                 p += 16u;
                 continue;
@@ -2892,6 +3663,8 @@ static int boot_int(mc3_u32 id, int *out) {
 // in Los Angeles any more.
 static void release_all() {
     State *s = st();
+    lights_release();
+    fx_release();
     if (s) {
         const mc3_u32 streams[5] = { s->rsc_stream, s->shared_stream, s->amb_stream,
                                      s->cpvs_stream, s->hood.stream };
@@ -2964,6 +3737,7 @@ static int load_step() {
     if (s->cpvs_state == 2u && !s->map_ready) cover_components();
     // props last: the city is complete without them
     if ((s->map_ready || s->map_error || s->cpvs_error) && s->prop_state < 2u) step_props();
+    if (s->textures_ready && s->sky_state < 2u && sky_enabled()) step_sky();
     if (s->prop_error && !s->prop_reported) {
         s->prop_reported = 1u;
         mark('R','P','R','E', s->prop_error, s->prop_type_count);
@@ -3410,6 +4184,9 @@ static void camera_tour(mc3_u32 camera, int seconds) {
 // ends far below ground_y (or wherever the game respawns it). The camera
 // watches each drop from 20 m away. Markers RDRP <index> <final y * 16>,
 // RDRX <final x> <final z>, RDRE <points> when done (then the tour stops).
+// mc2g = Fd ("drive"): the car is put at each point FACING its velocity and
+// thrown once at it, the game's camera is left alone - a way to start a drive
+// anywhere (frame pacing on a given street, 2026-09-30).
 // ---------------------------------------------------------------------------
 static __attribute__((noinline)) const char *drop_path() {
     static const char s[] = "host0:/mc2_droptest.txt"; return s;
@@ -3452,8 +4229,14 @@ static void drop_load() {
     mark('R','D','R','L', s->drop_count, bytes);
     s->drop_state = 2u;
 }
+static int drop_drive() {
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','g'));
+    while (v && *v >= '0' && *v <= '9') ++v;
+    return v && *v == 'd';
+}
 static void drop_test(mc3_u32 camera, int frames) {
     State *s = st();
+    const int drive = drop_drive();
     if (!s->drop_state) {
         if (!load_finished()) return;           // the whole city first
         drop_load();
@@ -3477,12 +4260,19 @@ static void drop_test(mc3_u32 camera, int frames) {
         for (int k = 0; k < 12; ++k) m[k] = ffrom(0u);
         m[0] = m[4] = m[8] = ffrom(0x3F800000u);
         m[9] = t[0]; m[10] = t[1] + ffrom(0x3FC00000u); m[11] = t[2];   // 1.5 m up
+        const float speed = fsqrt(t[3] * t[3] + t[4] * t[4]);
+        if (drive && speed > ffrom(0x3F800000u)) {
+            // forward is -row 2: row 2 = -dir, row 0 = row 1 x row 2
+            const float dx = t[3] / speed, dz = t[4] / speed;
+            m[0] = -dz; m[1] = ffrom(0u); m[2] = dx;
+            m[6] = -dx; m[7] = ffrom(0u); m[8] = -dz;
+        }
         vel[0] = t[3]; vel[1] = ffrom(0u); vel[2] = t[4]; vel[3] = ffrom(0u);
         s->drop_opp[9] = car;
         s->drop_brain[3] = (mc3_u32)&s->drop_opp[0];
         MC3_CALL3(void, AI_TELEPORT_CAR, mc3_u32, mc3_u32, mc3_u32)
             ((mc3_u32)&s->drop_brain[0], (mc3_u32)m, (mc3_u32)vel);
-    } else if ((t[3] != ffrom(0u) || t[4] != ffrom(0u)) && f + 6u < (mc3_u32)frames) {
+    } else if (!drive && (t[3] != ffrom(0u) || t[4] != ffrom(0u)) && f + 6u < (mc3_u32)frames) {
         // wall test: keep pushing at the same speed (the car's own drag
         // stops a single throw within 2-5 m); phInertialCS::SetVelocity on
         // *(*(car+4)+104)+12, the body aiBrain::TeleportCar gives a velocity
@@ -3497,7 +4287,7 @@ static void drop_test(mc3_u32 camera, int frames) {
         mark('R','D','R','P', i, (mc3_u32)(int)(mine[10] * ffrom(0x41800000u)));
         mark('R','D','R','X', (mc3_u32)(int)mine[9], (mc3_u32)(int)mine[11]);
     }
-    if (ptr(camera)) {
+    if (ptr(camera) && !drive) {
         float eye[3], at[3];
         at[0] = t[0]; at[1] = t[1]; at[2] = t[2];
         eye[0] = t[0]; eye[1] = t[1] + ffrom(0x41A00000u); eye[2] = t[2] - ffrom(0x41A00000u);
@@ -3883,7 +4673,9 @@ static void reflect_mask_pass(mc3_u32 arena) {
             ad_put(w, 1, 0x3000Fu, 0u, 0x47u + ctx);         // alpha != 0, Z always
             ad_put(w, 2, 0x58u, 0u, 0x42u + ctx);            // Cs * Ad + Cd
             s->bound_switch = 0u;
+            queue_ref((mc3_u32)s->card_vp, 4u, VIF_FLUSH, VIF_UNPACK_VIEWPROJ);
             for (mc3_u32 k = 0; k < s->card_count; ++k) draw_instance_plain(s->cards[k], arena);
+            queue_ref(s->bootstrap + s->matrix_offset, 4u, VIF_FLUSH, VIF_UNPACK_VIEWPROJ);
             w = ad_begin(arena, 2u);
             if (w) {
                 ad_put(w, 0, 0x44u, 0u, 0x42u + ctx);        // the city's ALPHA again
@@ -3900,8 +4692,45 @@ static int is_refl_chain(mc3_u32 index) {
     const State *s = st();
     return s->refl_chain && index < MAX_CPVS_ENTRIES && (s->refl_chain[index >> 5] >> (index & 31u)) & 1u;
 }
+// MC2's sky layers at the camera, before anything else: depth test ALWAYS and
+// no Z write, so the city and MC3's cars draw over them wherever they are.
+static void queue_sky(mc3_u32 arena) {
+    State *s = st();
+    const mc3_u32 ctx = *(volatile mc3_u8 *)GS_CONTEXT;
+    mc3_u32 need = 0, last = NO_IMAGE;
+    for (mc3_u32 j = 0; j < s->sky_layers; ++j)
+        for (mc3_u32 k = 0; k < s->sky_layer[j].packets; ++k) {
+            const mc3_u32 image = s->sky_layer[j].slot[k];
+            if (image != last && !image_resident(image)) need += upload_bytes(image);
+            last = image;
+        }
+    if (!arena_can_take(need)) { ++s->frame_skipped; return; }
+    queue_zbuf(arena, 0);
+    volatile mc3_u32 *w = ad_begin(arena, 1u);
+    if (w) ad_put(w, 0, 0x3000Fu, 0u, 0x47u + ctx);             // alpha != 0, Z always
+    queue_ref((mc3_u32)s->sky_matrix, 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
+    for (mc3_u32 j = 0; j < s->sky_layers; ++j) {
+        const SkyLayer *l = &s->sky_layer[j];
+        for (mc3_u32 k = 0; k < l->packets; ++k) {
+            const mc3_u32 sw = use_image(l->slot[k], arena);
+            if (sw) bind_switch(sw);
+            queue_ref(l->addr[k], l->qwc[k], 0u, 0u);
+        }
+    }
+    w = ad_begin(arena, 1u);
+    if (w) ad_put(w, 0, 0x5100Fu, 0u, 0x47u + ctx);             // TEST as the city
+}
 static void draw_city() {
     State *s = st();
+    const int sky = s->sky_state == 2u && s->sky_layers && sky_enabled() && zwrite_enabled() &&
+                    ptr(s->camera);
+    if (sky) {
+        for (int k = 0; k < 16; ++k) s->sky_matrix[k] = ffrom(0u);
+        s->sky_matrix[0] = s->sky_matrix[5] = s->sky_matrix[10] = s->sky_matrix[15] = ffrom(0x3F800000u);
+        s->sky_matrix[12] = fword((const mc3_u32 *)(s->camera + 36u));
+        s->sky_matrix[13] = fword((const mc3_u32 *)(s->camera + 40u));
+        s->sky_matrix[14] = fword((const mc3_u32 *)(s->camera + 44u));
+    }
     const int draw_instances = s->instances_ready && instances_enabled();
     const int cpv = s->cpvs_state == 2u && s->map_ready && s->palette;
     const mc3_u32 *map_targets = s->target_word;
@@ -3912,9 +4741,10 @@ static void draw_city() {
     // cache - matrices just rewritten, banks loaded by STREAM_READ - is pushed
     // out first. Arena packets are then written through the uncached alias,
     // so REFs can be emitted while the frame is being decided.
+    const int native = world_mode();                 // boot arg: once, not per piece
     for (mc3_u32 i = 0; i < s->target_count; ++i)
         if (s->pieces[i].ready && s->targets[i].flags == 0u)
-            update_model_matrix(&s->pieces[i], &s->targets[i]);
+            update_model_matrix(&s->pieces[i], &s->targets[i], native);
     MC3_CALL1(void, FLUSH_CACHE, int)(0);
     __asm__ volatile("sync.l; sync.p" ::: "memory");
     const mc3_u32 arena = s->arena[s->queued & 1u];
@@ -3934,15 +4764,26 @@ static void draw_city() {
         s->all_white = v && v[0] == '1';
     }
     s->draw_radius = draw_radius();
+    mc3_u32 pc = cycles_now();
     queue_vcl(s->bootstrap);
+    // the sky BEFORE the CPVS palette: its MOD0 packets unpack over the VU
+    // memory the palette lives in, and drawn after it (first build of
+    // 2026-09-30) the city took its vertex colours from sky vertices - patches
+    // of orange/purple that changed with the camera (player's savestate)
+    if (sky) queue_sky(arena);
     if (cpv) queue_vcl(s->palette);
     if (zwrite_enabled()) queue_zbuf(arena, 1);
     // `_0_refl` chains (the reflective ground) are drawn as everything else and
     // also recorded, for reflect_mask_pass. later[]: target, or instance | 0x8000.
     s->later_count = 0;
     s->card_count = 0;
+    s->prof[0] += cycles_now() - pc; pc = cycles_now();
     const int split = cpv && s->palette_refl && s->later;
     const int card_pass = split && reflect_mask_enabled() && cards_enabled();
+    const float card_far = card_distance();
+    const float eye_x = fword((const mc3_u32 *)(s->camera + 36u));
+    const float eye_y = fword((const mc3_u32 *)(s->camera + 40u));
+    const float eye_z = fword((const mc3_u32 *)(s->camera + 44u));
     for (mc3_u32 i = 0; i < s->target_count; ++i) {
         Piece *piece = &s->pieces[i];
         if (!piece->ready || s->targets[i].flags != 0u) continue;
@@ -3959,12 +4800,19 @@ static void draw_city() {
         }
         queue_piece(piece, arena);
     }
+    s->prof[1] += cycles_now() - pc; pc = cycles_now();
     for (mc3_u32 i = 0; draw_instances && i < s->instance_count; ++i) {
         const mc3_u32 *record = instance_record(s, i);
         const ModelDraw *model = &s->models[record[0]];
         if (!instance_visible(record)) continue;
         if (card_pass && (s->card_model[record[0] >> 5] >> (record[0] & 31u)) & 1u) {
-            if (s->card_count < MAX_CARDS) s->cards[s->card_count++] = (mc3_u16)i;
+            // a card instance is a whole block of shop windows (130-270 m):
+            // kept when its sphere comes within the distance, the VU then
+            // drops the single cards beyond it (card_vp)
+            const float dx = fword(record + 1) - eye_x, dy = fword(record + 2) - eye_y,
+                        dz = fword(record + 3) - eye_z, reach = card_far + fword(record + 4);
+            if (dx * dx + dy * dy + dz * dz <= reach * reach && s->card_count < MAX_CARDS)
+                s->cards[s->card_count++] = (mc3_u16)i;
             continue;       // drawn by reflect_mask_pass, weighted by the mask
         }
         int ready = 1;
@@ -3994,15 +4842,20 @@ static void draw_city() {
         for (mc3_u32 j = 0; j < model->count; ++j)
             queue_piece(&s->pieces[model->pieces[j]], arena);
     }
+    s->prof[2] += cycles_now() - pc; pc = cycles_now();
     // MC2 props, after the city so their cut-outs blend over it
     const float cam_x = fword((const mc3_u32 *)(s->camera + 36u));
     const float cam_y = fword((const mc3_u32 *)(s->camera + 40u));
     const float cam_z = fword((const mc3_u32 *)(s->camera + 44u));
     const float prop_near2 = ffrom(0x47742400u);    // 250^2
     const float prop_lod2 = ffrom(0x461C4000u);     // 100^2
-    for (mc3_u32 i = 0; s->props_ready && props_enabled() && i < s->prop_count; ++i) {
+    // props_enabled() reads the boot args: once, not per prop (5700 lookups a
+    // frame were ~1 M EE cycles)
+    const mc3_u32 prop_n = s->props_ready && props_enabled() ? s->prop_count : 0u;
+    for (mc3_u32 i = 0; i < prop_n; ++i) {
         const float *rec = (const float *)(s->prop_records + i * 20u);
         const PropType *t = &s->prop_types[((const mc3_u32 *)rec)[4]];
+        if (!t->packets) continue;                  // particles only (steam vent)
         const float dx = rec[0] - cam_x, dy = rec[1] - cam_y, dz = rec[2] - cam_z;
         const float d2 = dx * dx + dy * dy + dz * dz;
         // MC2 draws only Far props at a distance; the rest end at PROP_NEAR
@@ -4011,7 +4864,9 @@ static void draw_city() {
         queue_prop(i, arena, d2 > prop_lod2);
     }
     queue_pins(arena);
+    s->prof[3] += cycles_now() - pc; pc = cycles_now();
     if (split) reflect_mask_pass(arena);
+    s->prof[4] += cycles_now() - pc;
     if (zwrite_enabled()) queue_zbuf(arena, *(volatile mc3_u8 *)GS_ZWRITE_FLAG != 0u);
     ++s->queued;
     if (s->queued == 1u || !(s->queued % 120u)) {
@@ -4092,7 +4947,31 @@ extern "C" void envmap_done_hook(mc3_u32 env) {
 }
 MC3_HOOK(ENVMAP_DEBUG_DRAW_CALL, envmap_done_hook);
 
+// EE cycles this hook takes (COP0 Count, one per cycle at 294.912 MHz; a
+// 30 fps frame is 9.83 M): average and worst of each 120 frames in RCYC.
+static void set_camera_hook_body(mc3_u32 camera);
 extern "C" void set_camera_hook(mc3_u32 camera) {
+    const mc3_u32 c0 = cycles_now();
+    set_camera_hook_body(camera);
+    State *s = st();
+    if (!s) return;
+    const mc3_u32 d = cycles_now() - c0;
+    s->cyc_sum += d;
+    if (d > s->cyc_max) s->cyc_max = d;
+    if (++s->cyc_frames >= 120u) {
+        mark('R','C','Y','C', s->cyc_sum / s->cyc_frames, s->cyc_max);
+        mark('R','C','Y','2', ((s->cyc_phys / s->cyc_frames) >> 10) << 16 | ((s->cyc_fx / s->cyc_frames) >> 10),
+             ((s->cyc_lights / s->cyc_frames) >> 10) << 16 | ((s->cyc_draw / s->cyc_frames) >> 10));
+        s->cyc_sum = s->cyc_max = s->cyc_frames = 0u;
+        s->cyc_phys = s->cyc_fx = s->cyc_lights = s->cyc_draw = 0u;
+        const mc3_u32 nf = 120u;
+        mark('R','C','Y','3', ((s->prof[0] / nf) >> 10) << 16 | ((s->prof[1] / nf) >> 10),
+             ((s->prof[2] / nf) >> 10) << 16 | ((s->prof[3] / nf) >> 10));
+        mark('R','C','Y','4', (s->prof[4] / nf) >> 10, 0u);
+        for (int k = 0; k < 5; ++k) s->prof[k] = 0u;
+    }
+}
+static void set_camera_hook_body(mc3_u32 camera) {
     const int city = in_mc2_city() && state_acquire();
     if (city && spectate_seconds() && !(st()->queued % 30u)) occ_probe();   // diagnostic, spectator runs only
     {
@@ -4142,15 +5021,26 @@ extern "C" void set_camera_hook(mc3_u32 camera) {
         s->texture_error = 0u;
     }
     if (!load_step()) { /* still loading */ }
-    if (s->props_ready && props_enabled()) step_prop_physics();
+    if (s->props_ready && props_enabled()) {
+        mc3_u32 c = cycles_now();
+        step_prop_physics();
+        s->cyc_phys += cycles_now() - c; c = cycles_now();
+        step_prop_fx();
+        s->cyc_fx += cycles_now() - c; c = cycles_now();
+        step_lights();
+        s->cyc_lights += cycles_now() - c;
+    }
     if (!s->manifest_ready || !s->bootstrap || !s->textures_ready ||
         !s->frame_ready || !update_view_projection()) return;
+    frustum_update();
     {   // [boot] mc2o = 0 (diagnostic): the MC2 city is not drawn at all
         const char *v = mc3_bootarg(MC3_ID('m','c','2','o'));
         if (v && v[0] == '0') return;
     }
     if (defer_city_draw()) { s->draw_pending = 1u; return; }
+    const mc3_u32 c = cycles_now();
     draw_city();
+    s->cyc_draw += cycles_now() - c;
 }
 
 MC3_HOOK(SET_CAMERA_HOOK, set_camera_hook);
