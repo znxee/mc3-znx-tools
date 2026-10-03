@@ -51,8 +51,11 @@ the finding behind the tool, and `python TOOL.py --help` lists its options.
 - The MC2 city modules (`city_mc2_rsc_draw_test`, `city_paris_slot7`,
   `losangeles_*`, `mc2_aib_compat`) share `mods/mc2_city_config.h` (per-city
   table for Los Angeles and Paris): copy it into `$MC3BOOT/mods/` next to the
-  module folders. They need mc3boot from commit `193bf5a` (2026-10-01) or
-  later: `mc3_heap_largest()` in `payload/mc3_heap.h` and `payload/mc2_dat.h`.
+  module folders. They need mc3boot from commit `84912b7` (2026-10-03) or
+  later: `mc3_heap_largest()` in `payload/mc3_heap.h` and `payload/mc2_dat.h`
+  (which since then also indexes the props' `anim/`, `bound/` and
+  `tune/banger/` files: the Paris ferris wheel animation and the MC2 props in
+  MC3's own physics).
 - The MC2 data those modules read (`mc2/<city>/...`) comes straight from
   Midnight Club 2's own `ASSETS.DAT` (PS2, SLUS-20209), copied unchanged as
   `MC2.DAT` into the HostFS root (`host0:MC2.DAT`) or a disc root
@@ -62,6 +65,10 @@ the finding behind the tool, and `python TOOL.py --help` lists its options.
   layer (the VIDEO folder) back behind the rebuilt first one.
 - `audio/mc3_music_core.py` also needs Edness's `MclHash.py` and `strtbl.py`
   on the Python path; they are not redistributed here.
+- Before trying a change on a real PS2, `tools/mc3_pcsx2_accurate.py on` puts
+  PCSX2 on its interpreters (EE cache emulated, no speed hacks): unlike the
+  recompiler, which logs a TLB miss and reads zero, they take the exception
+  the console takes. Every "TLB Miss" in a recompiler log is a hang on hardware.
 - Optional external programs: PCSX2 (with PINE enabled for the live tools),
   IDA Pro 9 with IDAPython on Python <= 3.9 (`mc3_ida.py`), ImHex (to open the
   `.hexpat` files), vgmstream-cli and psxavenc (audio conversion).

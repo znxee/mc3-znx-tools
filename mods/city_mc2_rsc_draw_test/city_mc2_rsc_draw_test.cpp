@@ -86,6 +86,9 @@ enum {
     MAX_PROP_TYPES = 128,
     MAX_PROPS = 8192,           // 5695 in LA, 8054 in Paris
     MAX_DYN_PROPS = 48,
+    MAX_ANIM_TYPES = 4,         // ferris wheel, its cabins, the crane container (not placed)
+    MAX_ANIM_PROPS = 48,        // Paris: the wheel and its 20 cabins
+    MAX_PHYS_PROPS = 64,        // props in MC3's physics level at once
     MAX_PROP_PACKETS = 8,
     MAX_AMB_ENTRIES = 2048,
     PRP0 = 0x30505250,
@@ -142,6 +145,8 @@ struct PropType {
     mc3_u32 far, packets2, pk2_addr[MAX_PROP_PACKETS];
     mc3_u16 pk2_qwc[MAX_PROP_PACKETS], pk2_slot[MAX_PROP_PACKETS];
     float mass;          // MC2 tune/phys/<name>.phys `mass:` (50 when absent)
+    mc3_u32 animated;    // `animation: 1` and its .anim loaded: AnimType index + 1
+    mc3_u32 ph_arch;     // MC3 phArchetype built from its .phys + .bnd (movable ones)
     mc3_u32 fixed;       // heavy (>= 1000 kg): a car does not move it
     mc3_u32 has_phys;    // a .phys exists (smoke/steam/particle props have none)
     // losangeles.prop template flags: FixedObject 1 = never moves (poles,
@@ -171,6 +176,17 @@ struct FxSpout {
 struct DynProp {
     mc3_u32 index, state;              // state 1 moving, 0 free slot
     float pos[3], vel[3], axis[3], angle, omega, base_y, rot0[9];
+};
+// An MC2 prop animation (step_prop_anim): one frame = a 3x3 rotation and a
+// translation, both local to the prop, row vectors like the prop matrices.
+struct AnimType {
+    mc3_u32 type, frames, data;        // data: frames x 12 floats (rows 0..2, translation)
+    float rate;                        // frames per second (30 x DefaultAnimSpeed)
+};
+struct AnimProp {
+    mc3_u32 index, anim;               // placed prop, AnimType
+    float phase;                       // frames ahead of the others
+    float base[12];                    // the placement: rows 0..2, position
 };
 struct ModelDraw {
     mc3_u32 flags, count, pieces[MAX_MODEL_PMDS];
@@ -283,6 +299,18 @@ struct State {
     float fr[28] __attribute__((aligned(16)));           // frustum_update: eye, radius, 5 planes, size cull
     mc3_u32 fr_ok;                                     // draw_city: setup/sky, components, instances, props, reflect (RCY3/4)
     mc3_u32 placeholders_city;                         // hide_placeholders: city already done
+    AnimType anim_type[MAX_ANIM_TYPES];                // step_prop_anim
+    AnimProp anim_prop[MAX_ANIM_PROPS];
+    mc3_u32 anim_types, anim_props, anim_state;
+    float anim_time;
+    // MC2 props in MC3's physics level (ph_update): per slot the prop + 1,
+    // its level index and whether it moves; per prop its slot + 1
+    mc3_u32 ph_on, ph_types, ph_pool, ph_scan, ph_count, ph_hits, ph_full;
+    mc3_u32 ph_prop[MAX_PHYS_PROPS];
+    mc3_u16 ph_idx[MAX_PHYS_PROPS];
+    mc3_u8 ph_live[MAX_PHYS_PROPS], ph_touched[MAX_PHYS_PROPS];
+    mc3_u32 ph_free_at[MAX_PHYS_PROPS];                // frame a dropped slot may be reused
+    mc3_u8 ph_slot_of[MAX_PROPS];
 };
 // State lives on the heap, taken when a race in an MC2 city starts
 // (state_acquire) and given back with everything else (release_all). As a
@@ -2285,6 +2313,7 @@ static __attribute__((noinline)) const char *kw_far() { static const char s[] = 
 static __attribute__((noinline)) const char *kw_fixed() { static const char s[] = "FixedObject:"; return s; }
 static __attribute__((noinline)) const char *kw_gfx() { static const char s[] = "GfxOnly:"; return s; }
 static __attribute__((noinline)) const char *kw_drivable() { static const char s[] = "Drivable:"; return s; }
+static __attribute__((noinline)) const char *kw_animation() { static const char s[] = "animation:"; return s; }
 
 // An ambients entry, read with Seek the first time it is asked for.
 static mc3_u32 amb_entry(mc3_u32 index, mc3_u32 fourcc) {
@@ -2352,6 +2381,7 @@ static __attribute__((noinline)) const char *phys_dir() { static const char s[] 
 static __attribute__((noinline)) const char *phys_ext() { static const char s[] = ".phys"; return s; }
 static __attribute__((noinline)) const char *kw_mass() { static const char s[] = "mass:"; return s; }
 static mc3_u32 read_whole(const char *path, mc3_u32 max, mc3_u32 *bytes, mc3_u32 *mem);
+static void ph_load_movable(PropType *t);
 static void load_prop_mass(PropType *t) {
     char path[96];
     mc3_u32 n = 0;
@@ -2535,6 +2565,7 @@ static void prop_part(PropType *t, const char *part) {
     }
 }
 
+static mc3_u32 load_anim_type(mc3_u32 type);
 // losangeles.prop, one line at a time (the .hood reader, mode 2).
 static void prop_line(const char *p) {
     State *s = st();
@@ -2584,9 +2615,20 @@ static void prop_line(const char *p) {
     }
     if (s->prop_type_count && !hd->in_inst) {
         PropType *last = &s->prop_types[s->prop_type_count - 1u];
-        if (starts(p, kw_fixed())) { last->fixed_object = p[12] == ' ' ? p[13] == '1' : p[12] == '1'; return; }
+        if (starts(p, kw_fixed())) {
+            last->fixed_object = p[12] == ' ' ? p[13] == '1' : p[12] == '1';
+            if (!last->fixed_object && last->has_phys) ph_load_movable(last);
+            return;
+        }
         if (starts(p, kw_gfx())) { last->gfx_only = p[8] == ' ' ? p[9] == '1' : p[8] == '1'; return; }
         if (starts(p, kw_drivable())) { last->drivable = p[9] == ' ' ? p[10] == '1' : p[9] == '1'; return; }
+        if (starts(p, kw_animation())) {
+            // loaded now, with the template: inflating it needs ~80 KB that
+            // the heap no longer has once the city runs
+            if (p[10] == ' ' ? p[11] == '1' : p[10] == '1')
+                last->animated = load_anim_type(s->prop_type_count - 1u);
+            return;
+        }
         if (starts(p, kw_name())) {
             const char *q = p + 5;
             while (*q == ' ' || *q == '\t') ++q;
@@ -2709,6 +2751,178 @@ static void rotate_vec(const float *v, const float *k, float sn, float cs, float
     out[1] = v[1] * cs + cy * sn + ky * d;
     out[2] = v[2] * cs + cz * sn + kz * d;
 }
+// ---------------------------------------------------------------------------
+// MC2's animated props: the template says `animation: 1` - the Paris ferris
+// wheel (p_prop_ferriswheel_x), its cabins (p_prop_ferris_box_x) and the
+// crane's container (*_prop_container_anim_01x, placed in neither city). Each
+// has one bone, and its animation is mc2/anim/<name>.anim in MC2's archive:
+//   u32 0, u32 frames, u32 channels (6), u32 0, u8 1, then frames x channels
+//   floats: transX transY transZ rotX rotY rotZ, local to the prop
+// (17 + frames * 24 bytes, checked on all three). The rotation is Euler
+// X, then Z, then Y, row vectors: only that order (or Y Z X) turns the wheel
+// by an even 6.1 degrees a frame through its (-pi, pi, z) frames. The speed
+// is MC2's tune/banger/<name>.bangerdata DefaultAnimSpeed (0.02 for the
+// wheel and its cabins: a turn in 98 s at 30 frames a second), 1 without it.
+// The 20 cabins are all placed at the wheel's hub; the animation carries each
+// one around, so instances of a type at the same spot are spread evenly over
+// the loop. The wheel turns by +z, the cabins go from +y towards -x: the same
+// way. Markers RANI <types << 16 | props> <frames of the first>.
+// ---------------------------------------------------------------------------
+static __attribute__((noinline)) const char *anim_dir() { static const char s[] = "mc2/anim/"; return s; }
+static __attribute__((noinline)) const char *anim_ext() { static const char s[] = ".anim"; return s; }
+static __attribute__((noinline)) const char *banger_dir() { static const char s[] = "mc2/tune/banger/"; return s; }
+static __attribute__((noinline)) const char *banger_ext() { static const char s[] = ".bangerdata"; return s; }
+static __attribute__((noinline)) const char *kw_anim_speed() { static const char s[] = "DefaultAnimSpeed"; return s; }
+static int path3(char *path, const char *dir, const char *name, const char *ext) {
+    int n = 0;
+    for (const char *d = dir; *d && n < 60; ++d) path[n++] = *d;
+    for (int i = 0; name[i] && i < 48 && n < 108; ++i) path[n++] = name[i];
+    for (const char *e = ext; *e && n < 127; ++e) path[n++] = *e;
+    path[n] = 0;
+    return n;
+}
+// sin and cos of any angle: reduced to [-pi/2, pi/2] for sincos_q's series
+static void sincos_any(float a, float *sn, float *cs) {
+    const float pi = ffrom(0x40490FDBu), half = ffrom(0x3FC90FDBu), two_pi = ffrom(0x40C90FDBu);
+    while (a > pi) a -= two_pi;
+    while (a < -pi) a += two_pi;
+    float flip = ffrom(0x3F800000u);
+    if (a > half) { a = pi - a; flip = -flip; }
+    else if (a < -half) { a = -pi - a; flip = -flip; }
+    sincos_q(a, sn, cs);
+    *cs *= flip;
+}
+// rows of a * b (3x3, row vectors: a then b)
+static void mul33(const float *a, const float *b, float *out) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            out[r * 3 + c] = a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
+}
+// One frame's local transform from its six channels: rows 0..2, translation
+static void anim_frame(const float *ch, float *out) {
+    float sx, cx, sy, cy, sz, cz;
+    sincos_any(ch[3], &sx, &cx);
+    sincos_any(ch[4], &sy, &cy);
+    sincos_any(ch[5], &sz, &cz);
+    const float z = ffrom(0u), one = ffrom(0x3F800000u);
+    const float rx[9] = { one, z, z,  z, cx, sx,  z, -sx, cx };
+    const float ry[9] = { cy, z, -sy,  z, one, z,  sy, z, cy };
+    const float rz[9] = { cz, sz, z,  -sz, cz, z,  z, z, one };
+    float xz[9];
+    mul33(rx, rz, xz);
+    mul33(xz, ry, out);
+    out[9] = ch[0]; out[10] = ch[1]; out[11] = ch[2];
+}
+static mc3_u32 load_anim_type(mc3_u32 type) {
+    State *s = st();
+    if (s->anim_types >= MAX_ANIM_TYPES) return 0u;
+    const PropType *t = &s->prop_types[type];
+    char path[128];
+    path3(path, anim_dir(), t->name, anim_ext());
+    mc3_u32 bytes = 0, mem = 0;
+    const mc3_u32 base = read_whole(path, 0x10000u, &bytes, &mem);
+    if (!base) { mark('R','A','N','F', 1u | (type << 16), mc3_heap_largest(mc3_heap_active())); return 0u; }
+    const mc3_u8 *b = (const mc3_u8 *)base;
+    const mc3_u32 frames = le32(b + 4), channels = le32(b + 8);
+    if (channels != 6u || !frames || frames > 1024u || 17u + frames * 24u != bytes ||
+        !heap_room(frames * 48u + 32u)) {
+        mark('R','A','N','F', 2u | (type << 16), bytes);
+        r_free((void *)mem);
+        return 0u;
+    }
+    float *data = (float *)r_alloc(frames * 48u + 16u);
+    if (!data) { r_free((void *)mem); return 0u; }
+    for (mc3_u32 k = 0; k < frames; ++k) {
+        float ch[6];
+        for (int c = 0; c < 6; ++c) ch[c] = ffrom(le32(b + 17u + k * 24u + c * 4u));
+        anim_frame(ch, data + k * 12u);
+    }
+    r_free((void *)mem);
+    float speed = ffrom(0x3F800000u);
+    path3(path, banger_dir(), t->name, banger_ext());
+    const mc3_u32 tune = read_whole(path, 0x4000u, &bytes, &mem);
+    if (tune) {
+        const char *q = (const char *)tune;
+        for (mc3_u32 i = 0; i + 17u < bytes; ++i)
+            if (starts(q + i, kw_anim_speed())) {
+                const char *v = q + i + 16;
+                speed = parse_float(&v);
+                break;
+            }
+        r_free((void *)mem);
+    }
+    AnimType *a = &s->anim_type[s->anim_types];
+    a->type = type; a->frames = frames; a->data = (mc3_u32)data;
+    a->rate = ffrom(0x41F00000u) * speed;               // 30 frames a second
+    return ++s->anim_types;
+}
+static void anim_init() {
+    State *s = st();
+    s->anim_state = 1u;
+    for (mc3_u32 i = 0; i < s->prop_count && s->anim_props < MAX_ANIM_PROPS; ++i) {
+        const mc3_u32 type = ((const mc3_u32 *)(s->prop_records + i * 20u))[4];
+        if (!s->prop_types[type].animated) continue;
+        const mc3_u32 a = s->prop_types[type].animated;
+        AnimProp *p = &s->anim_prop[s->anim_props++];
+        p->index = i; p->anim = a - 1u;
+        const float *m = (const float *)(s->prop_matrices + i * 64u);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) p->base[r * 3 + c] = m[r * 4 + c];
+        p->base[9] = m[12]; p->base[10] = m[13]; p->base[11] = m[14];
+    }
+    // instances of one type on the same spot share the loop evenly
+    for (mc3_u32 i = 0; i < s->anim_props; ++i) {
+        AnimProp *p = &s->anim_prop[i];
+        mc3_u32 rank = 0, same = 0;
+        for (mc3_u32 j = 0; j < s->anim_props; ++j) {
+            const AnimProp *q = &s->anim_prop[j];
+            if (q->anim != p->anim || q->base[9] != p->base[9] || q->base[10] != p->base[10] ||
+                q->base[11] != p->base[11]) continue;
+            if (j < i) ++rank;
+            ++same;
+        }
+        p->phase = (float)s->anim_type[p->anim].frames * (float)rank / (float)same;
+    }
+    mark('R','A','N','I', (s->anim_types << 16) | s->anim_props, s->anim_types ? s->anim_type[0].frames : 0u);
+}
+enum { GAME_FRAME_DT = 0x00618E20 };
+static void step_prop_anim() {
+    State *s = st();
+    if (!s->anim_state) anim_init();
+    if (!s->anim_props) return;
+    float dt = fword((const mc3_u32 *)GAME_FRAME_DT);
+    if (!(dt > ffrom(0u)) || dt > ffrom(0x3E4CCCCDu)) dt = ffrom(0x3D088889u);   // 0..0.2 s, else 1/30
+    s->anim_time += dt;
+    for (mc3_u32 i = 0; i < s->anim_props; ++i) {
+        const AnimProp *p = &s->anim_prop[i];
+        if (s->prop_moved[p->index]) continue;          // knocked loose: physics owns it
+        const AnimType *a = &s->anim_type[p->anim];
+        const float n = (float)a->frames;
+        float f = s->anim_time * a->rate + p->phase;
+        f -= n * (float)(int)(f / n);
+        mc3_u32 k = (mc3_u32)(int)f;
+        if (k >= a->frames) k = 0u;
+        const float w = f - (float)k, v = ffrom(0x3F800000u) - w;
+        const float *f0 = (const float *)a->data + k * 12u;
+        const float *f1 = (const float *)a->data + (k + 1u < a->frames ? k + 1u : 0u) * 12u;
+        float local[12];
+        for (int c = 0; c < 12; ++c) local[c] = f0[c] * v + f1[c] * w;
+        float rot[9];
+        mul33(local, p->base, rot);
+        float *m = (float *)(s->prop_matrices + p->index * 64u);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) m[r * 4 + c] = rot[r * 3 + c];
+        for (int c = 0; c < 3; ++c)
+            m[12 + c] = local[9] * p->base[c] + local[10] * p->base[3 + c] + local[11] * p->base[6 + c] +
+                        p->base[9 + c];
+        // the cull sphere follows: local centre through the new matrix
+        const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + p->index * 20u))[4]];
+        float *rec = (float *)(s->prop_records + p->index * 20u);
+        for (int c = 0; c < 3; ++c)
+            rec[c] = t->cx * m[c] + t->cy * m[4 + c] + t->cz * m[8 + c] + m[12 + c];
+    }
+}
+
 static int player_motion(float **pos, float **vel) {
     const mc3_u32 player = MC3_CALL1(mc3_u32, PLAYER_GET, int)(0);
     if (!ptr(player) || !ptr(word(player + 20u)) || !ptr(word(word(player + 20u) + 4u))) return 0;
@@ -3263,6 +3477,275 @@ static void line_up_test_props(const float *cp) {
     }
     s->dyn_next = MAX_DYN_PROPS - 1u;          // once (dyn_next != 0 from here on)
 }
+// ---------------------------------------------------------------------------
+// MC2 props in MC3's own physics ([boot] mc2v = 0 turns it off: the old
+// knock below takes them all again). MC2 and MC3 share the physics library: a prop's tune/phys/<name>.phys
+// and bound/<name>.bnd are the same text MC3 still reads for its peds and
+// traffic. Both come from MC2's archive while the props load and go to the
+// game's own loaders through a memory stream (Stream::CreateMemoryStream
+// 0x399B40 (name, buffer, size, 0, 1) as datAssetCache::Open does,
+// datBaseTokenizer::Init 0x433B48 on a 160-byte tokenizer with the ASCII
+// vtable at +152): phBound::Load 0x47E630, phArchetype::Load 0x4D8840. MC3 has
+// no archetype type BREAK (phArchetype::CreateOfType 0x4D8920 knows BASE, PHYS
+// and DAMP; breaking moved to phInstBreakable/mcBanger), so BREAK is read as
+// DAMP: its fields (TypeFlags, mass, damping {}) come in DAMP's order, and the
+// inertia is computed from the bound when the file has none. Composite bounds
+// (2 props) do not load and keep the old knock, and so do the FixedObject
+// templates (poles, palms, trees): their archetypes and bounds live in the
+// game's heap, whose high-water mark the front end's 1.1 MB memtop heap has to
+// fit above when the race ends, and that margin is thin with this renderer.
+// Near the car each prop becomes a phInstBreakable (80 bytes, ctor 0x4DF3D0,
+// phInst::Init 0x4DEEA8: archetype +4, level index +8, Matrix34 +16) in the
+// game's physics level *(0x619EEC), the way mcBanger::Attach adds its own:
+// level +24 vtable +136 add inactive (inst, 0, 15), +132 add fixed, +32
+// delete by index (as mcBanger::Detach: 0x4E2290 frees the record and an
+// active one's collider, marks the index deleted and sets inst +8 to -1; +140,
+// 0x4E4460, only unlinks it - a hit prop's collider then outlived the race and
+// woke up in the front end on freed memory, 0x4E3A98 reading inst+4); level +32 holds a state byte per index (0 fixed, 1 and 5
+// active - 704-byte colliders at +64 -, 2 inactive, 3 at +96) and +36 the
+// index's record (12 bytes; inactive at +80, fixed at +52, the instance at
+// record +8). A breakable activates on any hit (impulse
+// limit 0, 0x4DFD70) and MC3 simulates it from there - tumbling, the car, the
+// city, the other props. Promoted to active it gets ANOTHER level index: the
+// instance's own +8 is the truth (0xFFFF = out of the level); clearing the
+// archetype of one still in the level crashed the next collision test
+// (0x4E4DEC reads inst+4 -> +0x10). Each frame an active instance's matrix
+// becomes the prop's; far away and at rest it leaves the level where it lies -
+// unless it was ever hit: the simulator keeps pointers to what it touched
+// (contacts between frames), and a removed instance with its archetype gone
+// crashed the same test, so a hit prop stays in the level for the session, a
+// removed one keeps its archetype until the city goes, and its memory waits
+// PH_REUSE_FRAMES before another prop gets it.
+// Markers RPHY 1 <types> (loaded), 2 <prop> (hit), 3 <in level> <full>,
+// RPHF <stage << 16 | type> (a type that did not load).
+// ---------------------------------------------------------------------------
+enum {
+    PH_LEVEL = 0x00619EEC,
+    PH_INST_CTOR = 0x004DF3D0, PH_INST_INIT = 0x004DEEA8, PH_SET_ARCHETYPE = 0x004DEF58,
+    PH_BOUND_LOAD = 0x0047E630, PH_ARCH_LOAD = 0x004D8840, PH_ARCH_RELEASE = 0x004D8DE8,
+    PH_STREAM_MEMORY = 0x00399B40, PH_STREAM_CLOSE = 0x00399748,
+    PH_TOKENIZER_INIT = 0x00433B48, PH_ASCII_TOKENIZER_VT = 0x006323F8,
+    PH_LEVEL_VT = 24, PH_LEVEL_STATE = 32, PH_LEVEL_RECORD = 36,
+    PH_LEVEL_FIXED = 52, PH_LEVEL_INACTIVE = 80,
+    PH_ADD_FIXED = 132, PH_ADD_INACTIVE = 136, PH_DELETE = 32,
+    PH_INST_BYTES = 96, PH_REUSE_FRAMES = 300
+};
+static __attribute__((noinline)) const char *bound_dir() { static const char s[] = "mc2/bound/"; return s; }
+static __attribute__((noinline)) const char *bound_ext() { static const char s[] = ".bnd"; return s; }
+static __attribute__((noinline)) const char *kw_break() { static const char s[] = "BREAK"; return s; }
+static int ph_enabled() {
+    State *s = st();
+    if (!s->ph_on) {
+        const char *v = mc3_bootarg(MC3_ID('m','c','2','v'));
+        s->ph_on = v && v[0] == '0' ? 1u : 2u;          // on unless [boot] mc2v = 0
+    }
+    return s->ph_on == 2u;
+}
+// a bound (bound = 0) or an archetype on `bound` from the text at `text`
+static mc3_u32 ph_parse(const char *name, mc3_u32 text, mc3_u32 bytes, mc3_u32 bound) {
+    const mc3_u32 stream = MC3_CALL5(mc3_u32, PH_STREAM_MEMORY, const char *, mc3_u32, int, int, int)
+        (name, text, (int)bytes, 0, 1);
+    if (!ptr(stream)) return 0u;
+    mc3_u32 tok[40] __attribute__((aligned(16)));
+    for (int k = 0; k < 40; ++k) tok[k] = 0u;
+    tok[38] = PH_ASCII_TOKENIZER_VT;
+    MC3_CALL3(int, PH_TOKENIZER_INIT, mc3_u32, const char *, mc3_u32)((mc3_u32)tok, name, stream);
+    const mc3_u32 r = bound
+        ? MC3_CALL2(mc3_u32, PH_ARCH_LOAD, mc3_u32, mc3_u32)((mc3_u32)tok, bound)
+        : MC3_CALL1(mc3_u32, PH_BOUND_LOAD, mc3_u32)((mc3_u32)tok);
+    MC3_CALL1(int, PH_STREAM_CLOSE, mc3_u32)(stream);
+    return r;
+}
+static void ph_load_type(PropType *t, mc3_u32 phys_text, mc3_u32 phys_bytes) {
+    State *s = st();
+    t->ph_arch = 0u;
+    if (!ph_enabled()) return;
+    const mc3_u32 type = (mc3_u32)(t - s->prop_types);
+    if (!s->ph_pool) {
+        // the instances' room, taken now: the heap has no margin once the city runs
+        if (!heap_room(MAX_PHYS_PROPS * PH_INST_BYTES + 64u)) return;
+        s->ph_pool = (mc3_u32)r_alloc(MAX_PHYS_PROPS * PH_INST_BYTES + 32u);
+        if (!s->ph_pool) return;
+        for (mc3_u32 b = 0; b < MAX_PHYS_PROPS * PH_INST_BYTES + 32u; b += 4u)
+            *(volatile mc3_u32 *)(s->ph_pool + b) = 0u;
+    }
+    char path[128];
+    path3(path, bound_dir(), t->name, bound_ext());
+    mc3_u32 bb = 0, bmem = 0;
+    const mc3_u32 btext = read_whole(path, 0x10000u, &bb, &bmem);
+    if (!btext) { mark('R','P','H','F', (1u << 16) | type, 0u); return; }
+    const mc3_u32 bound = ph_parse(t->name, btext, bb, 0u);
+    r_free((void *)bmem);
+    if (!ptr(bound)) { mark('R','P','H','F', (2u << 16) | type, 0u); return; }
+    char *q = (char *)phys_text;
+    for (mc3_u32 i = 0; i + 5u < phys_bytes; ++i)
+        if (starts(q + i, kw_break())) { q[i] = 'D'; q[i + 1] = 'A'; q[i + 2] = 'M'; q[i + 3] = 'P'; q[i + 4] = ' '; break; }
+    const mc3_u32 arch = ph_parse(t->name, phys_text, phys_bytes, bound);
+    if (!ptr(arch)) {
+        MC3_CALL2(void, word(word(bound) + 8u), mc3_u32, int)(bound, 3);     // as phBound::Load on failure
+        mark('R','P','H','F', (3u << 16) | type, 0u);
+        return;
+    }
+    // our own reference (an archetype is born at 0, +26, and the instances
+    // hold theirs): the last instance letting go must not delete what the
+    // type still hands out; ph_release lets go of it
+    *(volatile mc3_u16 *)(arch + 26u) = (mc3_u16)(*(volatile mc3_u16 *)(arch + 26u) + 1u);
+    t->ph_arch = arch;
+    ++s->ph_types;
+}
+// A movable template's archetype: its .phys read again (the mass reader let
+// go of it) - while the props load, when the inflate still has room.
+static void ph_load_movable(PropType *t) {
+    char path[128];
+    path3(path, phys_dir(), t->name, phys_ext());
+    mc3_u32 bytes = 0, mem = 0;
+    const mc3_u32 text = read_whole(path, 4096u, &bytes, &mem);
+    if (!text) return;
+    ph_load_type(t, text, bytes);
+    r_free((void *)mem);
+}
+static mc3_u32 ph_inst(mc3_u32 k) {
+    return ((st()->ph_pool + 15u) & ~15u) + k * PH_INST_BYTES;
+}
+// the level still holds our instance at `idx` (the game may have reset it)
+static int ph_owned(mc3_u32 level, mc3_u32 idx, mc3_u32 inst) {
+    if (idx >= 0x2000u || *(volatile mc3_u16 *)(inst + 8u) != idx) return 0;
+    const mc3_u8 state = ((const volatile mc3_u8 *)word(level + PH_LEVEL_STATE))[idx];
+    const mc3_u32 rec = ((const volatile mc3_u16 *)word(level + PH_LEVEL_RECORD))[idx];
+    if (state == 2u) return word(word(level + PH_LEVEL_INACTIVE) + rec * 12u + 8u) == inst;
+    if (state == 0u) return word(word(level + PH_LEVEL_FIXED) + rec * 12u + 8u) == inst;
+    if (state == 3u) return word(word(level + 96u) + rec * 12u + 8u) == inst;
+    return state == 1u || state == 5u;              // active (colliders at +64): the index is ours
+}
+// Out of the level and the slot freed - or, when the level still holds the
+// instance under a record we cannot match, nothing: that memory must not be
+// handed to another prop (returns 0).
+static int ph_drop(mc3_u32 level, mc3_u32 k) {
+    State *s = st();
+    const mc3_u32 inst = ph_inst(k);
+    volatile mc3_u16 *at = (volatile mc3_u16 *)(inst + 8u);
+    if (ptr(level) && *at != 0xFFFFu) {
+        if (!ph_owned(level, *at, inst)) return 0;
+        MC3_CALL2(int, word(word(level + PH_LEVEL_VT) + PH_DELETE), mc3_u32, int)(level, (int)*at);
+        *at = 0xFFFFu;
+    }
+    s->ph_slot_of[s->ph_prop[k] - 1u] = 0u;
+    s->ph_prop[k] = 0u;
+    s->ph_free_at[k] = s->queued + PH_REUSE_FRAMES;
+    --s->ph_count;
+    return 1;
+}
+static void ph_add(mc3_u32 level, mc3_u32 i, const PropType *t) {
+    State *s = st();
+    mc3_u32 k = 0;
+    while (k < MAX_PHYS_PROPS && (s->ph_prop[k] || (int)(s->queued - s->ph_free_at[k]) < 0)) ++k;
+    if (k == MAX_PHYS_PROPS) { ++s->ph_full; return; }
+    const mc3_u32 inst = ph_inst(k);
+    if (word(inst) && ptr(word(inst + 4u)))           // a cooled-down instance: its archetype ref
+        MC3_CALL2(void, PH_SET_ARCHETYPE, mc3_u32, mc3_u32)(inst, 0u);
+    for (mc3_u32 b = 0; b < PH_INST_BYTES; b += 4u) *(volatile mc3_u32 *)(inst + b) = 0u;
+    MC3_CALL1(void, PH_INST_CTOR, mc3_u32)(inst);
+    const float *m = (const float *)(s->prop_matrices + i * 64u);
+    float mat[12] __attribute__((aligned(16)));
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 3; ++c) mat[r * 3 + c] = m[r * 4 + c];
+    MC3_CALL3(void, PH_INST_INIT, mc3_u32, mc3_u32, mc3_u32)(inst, t->ph_arch, (mc3_u32)mat);
+    const mc3_u32 vt = word(level + PH_LEVEL_VT);
+    const mc3_u32 idx = 0xFFFFu & (t->fixed_object
+        ? MC3_CALL2(mc3_u32, word(vt + PH_ADD_FIXED), mc3_u32, mc3_u32)(level, inst)
+        : MC3_CALL4(mc3_u32, word(vt + PH_ADD_INACTIVE), mc3_u32, mc3_u32, int, int)(level, inst, 0, 15));
+    if (idx == 0xFFFFu) {
+        MC3_CALL2(void, PH_SET_ARCHETYPE, mc3_u32, mc3_u32)(inst, 0u);
+        ++s->ph_full;
+        return;
+    }
+    s->ph_prop[k] = i + 1u;
+    s->ph_idx[k] = (mc3_u16)idx;
+    s->ph_live[k] = 0u;
+    s->ph_touched[k] = 0u;
+    s->ph_slot_of[i] = (mc3_u8)(k + 1u);
+    ++s->ph_count;
+}
+enum { PH_SCAN_PER_FRAME = 1024 };
+static void ph_update() {
+    State *s = st();
+    if (!ph_enabled() || !s->ph_types || !s->ph_pool) return;
+    const mc3_u32 level = word(PH_LEVEL);
+    if (!ptr(level) || !ptr(word(level + PH_LEVEL_VT))) return;
+    float *cp, *cv;
+    if (!player_motion(&cp, &cv)) return;
+    const float near2 = ffrom(0x44C80000u), far2 = ffrom(0x45992000u);     // 40 m, 70 m
+    const volatile mc3_u8 *lstate = (const volatile mc3_u8 *)word(level + PH_LEVEL_STATE);
+    for (mc3_u32 k = 0; k < MAX_PHYS_PROPS; ++k) {
+        if (!s->ph_prop[k]) continue;
+        const mc3_u32 i = s->ph_prop[k] - 1u, inst = ph_inst(k);
+        const mc3_u32 idx = *(volatile mc3_u16 *)(inst + 8u);
+        if (idx == 0xFFFFu) {                       // the game let it go (reset)
+            mark('R','P','H','Y', 4u, (i << 8) | s->ph_live[k]);
+            s->ph_slot_of[i] = 0u; s->ph_prop[k] = 0u; --s->ph_count;
+            s->ph_free_at[k] = s->queued + PH_REUSE_FRAMES;
+            continue;
+        }
+        s->ph_idx[k] = (mc3_u16)idx;
+        if (idx >= 0x2000u) continue;
+        const mc3_u8 state = lstate[idx];
+        float *m = (float *)(s->prop_matrices + i * 64u);
+        if (state == 1u || s->ph_live[k]) {
+            if (!s->ph_live[k] && state == 1u) {
+                s->ph_live[k] = 1u;
+                s->ph_touched[k] = 1u;
+                fx_on_hit(i, m, fsqrt(cv[0] * cv[0] + cv[2] * cv[2]));
+                if (s->ph_hits++ < 40u) mark('R','P','H','Y', 2u, i);
+            }
+            const float *pm = (const float *)(inst + 16u);
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 3; ++c) m[r * 4 + c] = pm[r * 3 + c];
+            const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+            float *rec = (float *)(s->prop_records + i * 20u);
+            for (int c = 0; c < 3; ++c)
+                rec[c] = t->cx * m[c] + t->cy * m[4 + c] + t->cz * m[8 + c] + m[12 + c];
+            if (state != 1u) s->ph_live[k] = 0u;          // asleep again: that was the last copy
+        }
+        const float dx = m[12] - cp[0], dz = m[14] - cp[2];
+        if (state != 1u && !s->ph_touched[k] && dx * dx + dz * dz > far2) ph_drop(level, k);
+    }
+    for (mc3_u32 n = 0; n < PH_SCAN_PER_FRAME && s->prop_count; ++n) {
+        const mc3_u32 i = s->ph_scan++ % s->prop_count;
+        if (s->ph_slot_of[i]) continue;
+        const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+        if (!t->ph_arch || t->gfx_only || t->drivable || t->animated) continue;
+        const float *m = (const float *)(s->prop_matrices + i * 64u);
+        const float dx = m[12] - cp[0], dz = m[14] - cp[2];
+        if (dx * dx + dz * dz < near2) ph_add(level, i, t);
+    }
+    if (!(s->queued & 255u)) mark('R','P','H','Y', 3u, (s->ph_count << 16) | s->ph_full);
+}
+// Before our memory goes: the level must not keep pointers into it, and the
+// archetypes and bounds (the game's heap: left behind they cost the front
+// end its 1.1 MB "memtop heap") go once nothing holds them - each instance
+// lets go of its archetype, then our own reference is released.
+static void ph_release() {
+    State *s = st();
+    if (!s || !s->ph_pool) return;
+    const mc3_u32 level = word(PH_LEVEL);
+    for (mc3_u32 k = 0; k < MAX_PHYS_PROPS; ++k) {
+        if (s->ph_prop[k] && !ph_drop(level, k)) {                 // the level still holds it
+            const mc3_u32 inst = ph_inst(k), idx = *(volatile mc3_u16 *)(inst + 8u);
+            mark('R','P','H','L', idx | (s->ph_prop[k] << 16),
+                 idx < 0x2000u ? ((const volatile mc3_u8 *)word(level + PH_LEVEL_STATE))[idx] : 0xFFu);
+            continue;
+        }
+        const mc3_u32 inst = ph_inst(k);
+        if (word(inst) && word(inst + 4u))
+            MC3_CALL2(void, PH_SET_ARCHETYPE, mc3_u32, mc3_u32)(inst, 0u);
+    }
+    for (mc3_u32 i = 0; i < s->prop_type_count; ++i)
+        if (s->prop_types[i].ph_arch) {
+            MC3_CALL2(int, PH_ARCH_RELEASE, mc3_u32, int)(s->prop_types[i].ph_arch, 1);
+            s->prop_types[i].ph_arch = 0u;
+        }
+}
+
 static void step_prop_physics() {
     State *s = st();
     float *cp, *cv;
@@ -3272,7 +3755,7 @@ static void step_prop_physics() {
         if (speed > ffrom(0x3FC00000u)) {
             const float range = ffrom(0x40C00000u);
             for (mc3_u32 i = 0; i < s->prop_count; ++i) {
-                if (s->prop_moved[i]) continue;
+                if (s->prop_moved[i] || s->ph_slot_of[i]) continue;
                 const float *m = (const float *)(s->prop_matrices + i * 64u);
                 const float dx = m[12] - cp[0], dz = m[14] - cp[2], dy = m[13] - cp[1];
                 if (dx > range || dx < -range || dz > range || dz < -range) continue;
@@ -3715,6 +4198,7 @@ static int boot_int(mc3_u32 id, int *out) {
 // in Los Angeles any more.
 static void release_all() {
     State *s = st();
+    ph_release();
     lights_release();
     fx_release();
     if (s) {
@@ -3734,6 +4218,7 @@ static void release_all() {
     }
     t->dropped = 0; t->retry = 0;
     mark('R','R','E','L', blocks, mc3_heap_largest(mc3_heap_active()));
+    mark('R','R','E','G', mc3_heap_free(mc3_heap_active()), mc3_heap_active());
 }
 
 // In a race (or its replay) in Los Angeles. City = mcRaceConfig current +0 (the
@@ -5113,6 +5598,8 @@ static void set_camera_hook_body(mc3_u32 camera) {
     if (!load_step()) { /* still loading */ }
     if (s->props_ready && props_enabled()) {
         mc3_u32 c = cycles_now();
+        step_prop_anim();
+        ph_update();
         step_prop_physics();
         s->cyc_phys += cycles_now() - c; c = cycles_now();
         step_prop_fx();

@@ -200,5 +200,29 @@ extern "C" void mc3_city_paris_slot7_after_load(void)
                                                                       //  post-load>
 }
 
+// The city's siren/helicopter sound bank. sub_209B98 reads it from a table at
+// 0x615740, 20 bytes per city - indexed by the current race config's city
+// (*(0x619B10)) with no bound, and the table has entries for cities 0..3 only
+// (all four "Sirens_Helicopt"). Los Angeles (5) read 0x3F3AE148 - a float -
+// as the bank's name and Paris (6) a null pointer, both handed to the audio
+// manager and the name hash 0x578648. PCSX2's recompiler logs that as a TLB
+// miss and reads zero; the console (and PCSX2's interpreter) takes the
+// exception, and the game stopped on the loading screen of either city.
+// Its only two callers - mcAudioManager::FrontendStart (0x1BDE24) and
+// mcLayerAmbients::Unload (0x1BDF30) - get this instead: cities past the table
+// use San Diego's bank. (The MCLA PSP fork's install hooks the same two calls;
+// it does not load this module.)
+enum { SIREN_TABLE = 0x00615740, SIREN_STRIDE = 20, SIREN_CITIES = 4, RACE_CONFIG = 0x00619B10 };
+extern "C" mc3_u32 mc3_city_siren_bank(void)
+{
+    const mc3_u32 cfg = *(volatile mc3_u32 *)RACE_CONFIG;
+    mc3_u32 city = cfg ? *(volatile mc3_u32 *)cfg : 0u;
+    if (city >= (mc3_u32)SIREN_CITIES)
+        city = 0u;
+    return *(volatile mc3_u32 *)(SIREN_TABLE + city * SIREN_STRIDE);
+}
+
 MC3_HOOK(0x001A0F40, mc3_city_paris_slot7);
 MC3_HOOK(0x001A12E0, mc3_city_paris_slot7_after_load);
+MC3_HOOK(0x001BDE24, mc3_city_siren_bank);
+MC3_HOOK(0x001BDF30, mc3_city_siren_bank);
