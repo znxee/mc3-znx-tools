@@ -14,7 +14,8 @@ Steps (seconds are wall-clock):
     down BUTTON / up BUTTON  press / release and keep going (shots while held)
     burst NAME N          N screen grabs as fast as possible (NAME_000.png ...)
     key KEYS [N]          tap raw keyboard keys N times (1..9, 0, backspace,
-                          enter, shift, ctrl; several joined by +, e.g.
+                          enter, shift, ctrl, f1, f2, f8, f9, tab, space;
+                          several joined by +, e.g.
                           shift+2) - for mods that read the USB keyboard
     shot NAME             screenshot to OUT/NAME.png
     state                 savestate to slot 1 (F1) - overwrites slot 1
@@ -45,7 +46,7 @@ KEYS = {
 }
 RAW = {str(d): (0x30 + d, False) for d in range(10)}
 RAW.update({'backspace': (0x08, False), 'enter': (0x0D, False), 'shift': (0x10, False),
-            'ctrl': (0x11, False), 'alt': (0x12, False), 'f1': (0x70, False), 'f2': (0x71, False), 'f9': (0x78, False), 'tab': (0x09, False), 'space': (0x20, False)})   # ctrl+alt+f9 = video capture
+            'ctrl': (0x11, False), 'alt': (0x12, False), 'f1': (0x70, False), 'f2': (0x71, False), 'f8': (0x77, False), 'f9': (0x78, False), 'tab': (0x09, False), 'space': (0x20, False)})   # ctrl+alt+f9 = video capture
 PAD_NAMES = {'up': 'Up', 'down': 'Down', 'left': 'Left', 'right': 'Right',
              'cross': 'Cross', 'circle': 'Circle', 'square': 'Square',
              'triangle': 'Triangle', 'start': 'Start', 'select': 'Select',
@@ -85,6 +86,8 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--statefile', help='start from this .p2s instead of booting (pcsx2 -statefile)')
     ap.add_argument('--iso', help='boot this disc image instead of --elf')
+    ap.add_argument('--gui', action='store_true', help='run with the main window (no -batch -nogui)')
+    ap.add_argument('--disc', help='disc image to mount under --elf (as the game list does: ELF + ISO, so the GameDB fixes of the disc serial apply)')
     ap.add_argument('--no-hostfs', action='store_true',
                     help='HostFs = false for this run (a disc test: mc3boot reads host0: first)')
     ap.add_argument('steps', nargs='+')
@@ -100,10 +103,13 @@ def main():
         if a.no_hostfs:
             text = text.replace('HostFs = true', 'HostFs = false')
         open(INI, 'w', encoding='utf-8').write(text)
-        cmd = [S.PCSX2, '-batch', '-nogui', '-logfile', S.LOG]
+        cmd = [S.PCSX2, '-logfile', S.LOG] if a.gui else [S.PCSX2, '-batch', '-nogui', '-logfile', S.LOG]
         if a.statefile:
             cmd += ['-statefile', a.statefile]
-        cmd += ['--', a.iso or a.elf]
+        if a.disc and not a.iso:
+            cmd += ['-elf', a.elf, '--', a.disc]
+        else:
+            cmd += ['--', a.iso or a.elf]
         p = subprocess.Popen(cmd,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         t0 = time.time()

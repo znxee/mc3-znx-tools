@@ -282,6 +282,7 @@ struct State {
     mc3_u32 prof[5];
     float fr[28] __attribute__((aligned(16)));           // frustum_update: eye, radius, 5 planes, size cull
     mc3_u32 fr_ok;                                     // draw_city: setup/sky, components, instances, props, reflect (RCY3/4)
+    mc3_u32 placeholders_city;                         // hide_placeholders: city already done
 };
 // State lives on the heap, taken when a race in an MC2 city starts
 // (state_acquire) and given back with everything else (release_all). As a
@@ -4964,6 +4965,42 @@ static int defer_city_draw() {
     const mc3_u32 city = word(CITY_PTR);
     return ptr(city) && ptr(word(city + 464u)) && (*(volatile mc3_u16 *)CULL_PASS_MASK & 4u);
 }
+
+// The .pck mc3_city_build.py writes for LA and Paris carries one placeholder
+// component, gerado_00 (the loader wants at least one): a small cube on shader
+// slot 0, whose texture points into a texture page these cities never load.
+// Binding it sent 128 bytes of RAM 0x600 as a 16x16 PSMT4 image (CLUT from
+// 0x300) to VRAM block 0 - the displayed front buffer - once per frame while
+// the cube was in view (Paris: at the Arc de Triomphe). PCSX2's hardware
+// renderer then lost its copy of the display buffer and showed "No Image" on
+// every other field; the software renderer, and Skip Presenting Duplicate
+// Frames, hid it. Its model slots are cleared once the city is up:
+// mcCityModelInfo::GetModel (0x24C9C0) then returns 0, which every pass of
+// mcCityModelType::Render (0x24C380) and mcCityModel::AddAreaLight checks.
+// The list: mcCity+0x194 -> owner, owner+4 -> last ComponentData, +0x0C back.
+// Marker RPHD <hidden> <components>.
+enum { CITY_COMPONENTS = 0x194, CD_NAME = 0x08, CD_PREV = 0x0C, CD_MODELS = 0x3C, CD_MODEL_SLOTS = 10 };
+static __attribute__((noinline)) const char *placeholder_prefix() { static const char s[] = "gerado_"; return s; }
+static void hide_placeholders() {
+    State *s = st();
+    const mc3_u32 city = word(CITY_PTR);
+    if (!ptr(city) || s->placeholders_city == city) return;
+    s->placeholders_city = city;
+    const mc3_u32 owner = word(city + CITY_COMPONENTS);
+    if (!ptr(owner)) return;
+    const char *prefix = placeholder_prefix();
+    mc3_u32 hidden = 0, n = 0;
+    for (mc3_u32 cd = word(owner + 4u); ptr(cd) && n < 8192u; cd = word(cd + CD_PREV), ++n) {
+        const mc3_u32 name = word(cd + CD_NAME);
+        if (!ptr(name)) continue;
+        int k = 0;
+        while (prefix[k] && *(const volatile char *)(name + k) == prefix[k]) ++k;
+        if (prefix[k]) continue;
+        for (mc3_u32 m = 0; m < CD_MODEL_SLOTS; ++m) put_u32(cd + CD_MODELS + 4u * m, 0u);
+        ++hidden;
+    }
+    mark('R','P','H','D', hidden, n);
+}
 // Drawn here, in the middle of mcCullableMgr::Render, the city's own VU1
 // program and constants (bootstrap) overwrite what MC3 already uploaded for the
 // rest of the frame - light matrices, state - and its cars came out black on an
@@ -5060,6 +5097,7 @@ static void set_camera_hook_body(mc3_u32 camera) {
     }
     t->active = 1u;
     fix_ai_floor();
+    hide_placeholders();
     State *s = st();
     s->camera = camera;
     if (s->draw_pending) {                 // last frame never reached the paste
