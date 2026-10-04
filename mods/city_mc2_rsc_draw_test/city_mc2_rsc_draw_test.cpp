@@ -5782,11 +5782,12 @@ static __attribute__((noinline)) float *fe_camera_store() {
 // point 3.83 m ahead (+1616). Placed by the user in a savestate (2026-10-01):
 // target 684.362,8.108,483.404, look-at 688.185,8.290,483.542.
 // Paris takes the same one: the front-end panel sits at the same world spot
-// in both cities (checked by the user). 0 = none (the San Diego entry).
+// in both cities (checked by the user); Tokyo (MC2) too, as in the combined
+// install. 0 = none (the San Diego entry).
 static __attribute__((noinline)) const mc3_u32 *fe_camera_builtin(mc3_u32 city) {
     static const mc3_u32 la[6] = { 0x442B172Bu, 0x4101BA5Eu, 0x43F1B3B6u,
                                    0x442C0BD7u, 0x4104A3D7u, 0x43F1C560u };
-    return city == 5u || city == 6u ? la : 0;
+    return mc2_city_supported(city) ? la : 0;
 }
 extern "C" mc3_u32 fe_transition(mc3_u32 view, mc3_u32 target, mc3_u32 lookat) {
     const mc3_u32 cfg = word(RACE_CONFIG_CURRENT);

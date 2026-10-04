@@ -1,5 +1,6 @@
 // -----------------------------------------------------------------------------
-//  losangeles_arcade - the added cities (5 losangeles, 6 paris) in the Arcade menu.
+//  losangeles_arcade - the added cities (5 losangeles, 6 paris, 7 tokyo_mc2) in the
+//  Arcade menu.
 //
 //  Two things kept them out, both measured in the ELF:
 //
@@ -8,7 +9,7 @@
 //         0033DAB4  li    v1, 4          ; div (cur + dir) by 4
 //         0033DAD8  addiu s1, a2, 4      ; negative remainder + 4
 //     and skips a city whose race count (record +0x14) is 0 or that is not
-//     unlocked. Both words become 7 (the size of the city table with
+//     unlocked. Both words become 8 (the size of the city table with
 //     city_paris_slot7); nocity (4) has no races and keeps being skipped.
 //  2. mcPgUnlockingRulesEval::IsCityUnlocked (0x004D42B0) asks the save's
 //     rule table (IsRuleSatisfied(this, 5, city, 1), jal at 0x004D42CC), which
@@ -32,8 +33,8 @@ enum {
     RULE_CITY_UNLOCKED = 5,
     FIRST_ADDED_CITY = 5,
     FLUSH_CACHE = 0x00546C20,
-    MOD_WORD_A = 0x0033DAB4, MOD_OLD_A = 0x24030004u, MOD_NEW_A = 0x24030007u,
-    MOD_WORD_B = 0x0033DAD8, MOD_OLD_B = 0x24D10004u, MOD_NEW_B = 0x24D10007u,
+    MOD_WORD_A = 0x0033DAB4, MOD_OLD_A = 0x24030004u, MOD_NEW_A = 0x24030008u,
+    MOD_WORD_B = 0x0033DAD8, MOD_OLD_B = 0x24D10004u, MOD_NEW_B = 0x24D10008u,
 };
 
 static __attribute__((noinline)) void put(char c) { *(volatile unsigned char *)0x1000F180 = (unsigned char)c; }

@@ -539,8 +539,9 @@ static void hood_line(char *l, char *arg) {
         while (*p == ' ' || *p == '\t') ++p;
         const char *w = solid_type();
         int same = 1;
-        while (*w) if (*p++ != *w++) { same = 0; break; }
-        if (same && (*p == 0 || *p == ' ' || *p == '\r' || *p == '\t')) arg[0] = 1;
+        while (*w && *w != '*') if (*p++ != *w++) { same = 0; break; }
+        // "name*" (Tokyo's railway pylons) matches every type starting so
+        if (same && (*w == '*' || *p == 0 || *p == ' ' || *p == '\r' || *p == '\t')) arg[0] = 1;
         return;
     }
     if (!arg[0] || G()->solids >= MAX_SOLID) return;

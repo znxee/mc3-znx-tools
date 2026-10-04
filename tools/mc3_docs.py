@@ -23,7 +23,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (BaseDocTemplate, Frame, KeepTogether, PageBreak,
                                 PageTemplate, Paragraph, Spacer, Table, TableStyle)
 
-VERSION = "5.0"
+VERSION = "5.1"
 TITLE = "Midnight Club 3 - File Format Documentation"
 SUBTITLE = "PS2 .pck / PSP .psppck / Xbox .xbck, and the executable"
 
@@ -1059,6 +1059,22 @@ CONTENT = [
        "<font face=Courier>losangeles.aib</font> uses 0x4107 and 0x410A and no 0x410C, and "
        "loads unchanged as <font face=Courier>losangeles_city.aib</font> (the one it replaced "
        "was tokyo's, byte for byte)."),
+ ("p", "The router ends with an n x n u16 next-hop table indexed by road: from road a to road b "
+       "go to road table[a*n + b], 0xFFFF = no way. The route search 0x5059B0 walks it for the "
+       "battle modes' AI only (capture_the_flag, tag, keepaway, bomb_tag, paint...); point-to-point "
+       "races never call it. MC3 stores it as 0x4202 (u32 n) + 0x4204 (one block, Tokyo n = 277 of "
+       "717 roads); MC2 as 0x4206 (u16 n) + n records 0x4207 (u16 n + one row), n = every road. "
+       "MC3's loader skips MC2's tags, so n and the table pointer (router+68/+72) stayed 0 and the "
+       "search read 2*road from address 0: TLB miss at 0x505A30, read as 0 by PCSX2's recompiler, "
+       "fatal on a PS2. mc2_aib_compat builds the table from MC2's rows at load time, only for a "
+       "battle race type (+0x18 of the current mcRaceConfig): it costs 2*n*n bytes (LA 211 KB, "
+       "Paris 220 KB, Tokyo 331 KB) of the heap the props' physics load from next. Otherwise the "
+       "router gets n = 0 and a 2 KB all-0xFFFF table from the same heap."),
+ ("p", "The battle route planner (sub_41B440) asks sub_41B120 for the nodes shared by a road and "
+       "the next one; a path ending on a road of type 0 or 4 has no next road and the call reads "
+       "address 4 (TLB miss 0x41B150/0x41B160) - with MC2's files on every battle map. The three "
+       "calls (0x41C148, 0x41C164, 0x41C23C) answer 0 for a null road, which is what the "
+       "emulator's read of 0 produced."),
  ("h3", "MC2 CPVS: an instance's chain is not its whole model"),
  ("p", "In MC2's <font face=Courier>&lt;time&gt;_cpvs.rsc</font> each placed instance has one "
        "<font face=Courier>..._&lt;type&gt;&lt;extension&gt;_0_main</font> PCP0 - the DMA chain that "

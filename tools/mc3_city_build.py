@@ -896,9 +896,17 @@ def empty_hood(e):
     reads nothing; the pointer only has to be a legitimate address. The lesson of
     `empty_array` applies: on the PS2 reading address 0 does not fault, it
     returns the start of RAM and Place walks off into garbage.
+
+    The 16 bytes BEFORE the array are the new[] cookie (count, as in retail:
+    `[count][CD CD CD]`). mcHood::DeleteModels 0x25D418 reads the count FROM
+    THERE, not from the HoodEntry, and calls each element's virtual destructor:
+    without that cookie the block inherited the previous object's word (1) and
+    leaving the city jumped to a null vtable (measured: pc=0 coming back from
+    the Arcade, 2026-09-27).
     """
     if 'empty_hood' not in e.marks:
-        e.put(bytes(0x60), 'empty_hood')
+        at = e.put(struct.pack('<I', 0) + b'\xCD' * 12 + bytes(0x60), 'empty_hood_cookie')
+        e.label('empty_hood', at + 16)
     return 'empty_hood'
 
 
@@ -1507,7 +1515,7 @@ def inline_palettes(e, r):
 
 def build(out_path, donor, blocks, hood_name='zz', position=(0.0, 0.0, 0.0),
              n_slots=1329, n_groups=18, material_index=1, probe=False,
-             hoods=None, slot_shader=None, texture_donor=None):
+             hoods=None, slot_shader=None, texture_donor=None, extents=None):
     e = Writer()
 
     # ---------------------------------------------------------------- shader
@@ -1590,8 +1598,10 @@ def build(out_path, donor, blocks, hood_name='zz', position=(0.0, 0.0, 0.0),
     # common value: 230 against 50 for the runner-up.
     comp[0x0B] = 8
     half = max(abs(q[i]) for pos, _u, _n, _o in blocks for q in pos for i in (0, 2))
-    # the cube inherits the donor's extents, so the donor's grid is the right one here
-    grid = donor_grid(donor)
+    # A city shell may use a synthetic cube but still needs the grid of the
+    # target city's extents. Without explicit extents, keep the historical
+    # behaviour and inherit the donor's grid.
+    grid = grid_from_extents(*extents) if extents else donor_grid(donor)
     x0, x1, z0, z1 = cell_box(grid, position[0], position[2], half, half)
     comp[0x14], comp[0x15], comp[0x16], comp[0x17] = x0, x1, z0, z1
     off_comp = e.put(bytes(comp), 'components')
@@ -1653,6 +1663,12 @@ def build(out_path, donor, blocks, hood_name='zz', position=(0.0, 0.0, 0.0),
     e.point(r + 0x10, 'field10')
     e.u32(r + 0x14, 0 if probe else len(hood_names))
     e.point(r + 0x18, 'hoods')
+    if extents:
+        mn, mx = extents
+        for k, values in ((0x238, mn), (0x244, mx)):
+            for j, value in enumerate(values):
+                struct.pack_into('<f', e.d, r + k + 4 * j, value)
+        struct.pack_into('<iiii', e.d, r + 0x26C, *grid)
     # the flat index, now with the real component inside
     # THE SIZE OF THE TWO PER-CELL ARRAYS IS `grid_w * grid_h`, NOT ANY NUMBER.
     # I wrote 64 at +0x268 and left +0x26C/+0x270 as they came from the donor
@@ -2215,7 +2231,7 @@ def emit_instances(e, insts, models_dir, grid, material_index=1,
                                  slot_count)
         else:
             _emit_mesh(e, blocks, map_key, material_index, slot_count=slot_count)
-        off_cd = e.put(compdata_inst(radius, centre, b'generated_inst'), map_key + '_cd')
+        off_cd = e.put(compdata_inst(radius, centre, b'gerado_inst'), map_key + '_cd')
         put_embedded_mesh(e, off_cd, map_key + '_mt', map_key + '_gt',
                           blocks, map_key + '_emb', slot_count=slot_count)
         e.label(map_key + '_name', off_cd + 0x70)
@@ -2658,8 +2674,13 @@ def build_place(out_path, donor, place, models_dir, n_slots=1329,
     return n
 
 
-def compdata(radius, position, name=b'generated_00'):
+def compdata(radius, position, name=b'gerado_00'):
     """A ComponentData with the CONSTANT fields all 651 in atlanta have.
+
+    The name stays the original Portuguese `gerado_00` (Portuguese for
+    "generated"): city_mc2_rsc_draw_test's hide_placeholders finds the
+    placeholder cube by the prefix `gerado_`, so a translated name left the
+    cube visible (and its garbage texture flickering on screen).
 
     Leaving this zeroed is what produced the `R5900 Exception: Jump to unaligned
     address` when getting close to the model: **`+0x28` is a vtable TOKEN, the
@@ -3509,6 +3530,10 @@ def main():
     ap.add_argument('--scale', type=float, default=1.0)
     ap.add_argument('--side', type=float, default=40.0, help='side of the test cube')
     ap.add_argument('--pos', default='0,0,0')
+    ap.add_argument('--extents-min', metavar='X,Y,Z',
+                    help='minimum extents for the synthetic shell (without --place)')
+    ap.add_argument('--extents-max', metavar='X,Y,Z',
+                    help='maximum extents for the synthetic shell (without --place)')
     ap.add_argument('--hoods',
                     help='comma-separated hood names, replacing the '
                          "donor's; AT MOST THREE CHARACTERS each")
@@ -3679,8 +3704,17 @@ def main():
             raise SystemExit('a hood name has at most 3 characters '
                              '(the .pck field has 4 bytes): %s'
                              % ', '.join(too_long))
+    if bool(a.extents_min) != bool(a.extents_max):
+        ap.error('--extents-min and --extents-max go together')
+    extents = None
+    if a.extents_min:
+        mn = tuple(float(x) for x in a.extents_min.split(','))
+        mx = tuple(float(x) for x in a.extents_max.split(','))
+        if len(mn) != 3 or len(mx) != 3:
+            ap.error('extents take three values X,Y,Z')
+        extents = (mn, mx)
     build(a.out_path, a.donor, blocks, a.hood, pos, a.slots, a.groups, a.material,
-          a.probe, hoods, a.shader_slot, a.texture_donor)
+          a.probe, hoods, a.shader_slot, a.texture_donor, extents)
     print()
     verify(a.out_path)
 

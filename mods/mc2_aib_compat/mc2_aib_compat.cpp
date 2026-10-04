@@ -109,5 +109,112 @@ extern "C" mc3_u32 load_rail_network_hook(mc3_u32 net, mc3_u32 name) {
 }
 MC3_HOOK(LOAD_RAIL_NETWORK_CALL, load_rail_network_hook);
 
+// aiRouter next-hop table. The router (tag 0x4106, read by sub_504E48) ends
+// with an n x n u16 table, by road: from road a to road b go to road
+// table[a*n + b] (0xFFFF = none), walked by the route search 0x5059B0 - the
+// battle modes' AI only; point-to-point races never call it. MC3 stores it
+// as 0x4202 (u32 n) + 0x4204 (one block); MC2 as 0x4206 (u16 n) + n records
+// 0x4207 (u16 n + one row), which MC3's loader skips: n (router+68) and the
+// table (router+72) stayed 0 and the search read 2*road from address 0 - a
+// TLB miss at 0x505A30, ignored by PCSX2's recompiler, fatal on a PS2.
+// The table costs 2*n*n bytes (LA 211 KB, Paris 220 KB, Tokyo 331 KB) taken
+// from the heap the props' physics load from next, so it is built only for
+// a race type whose AI routes (BATTLE_TYPES); otherwise n stays 0 and the
+// table is a 2 KB block from the same heap (the router frees it as its own)
+// of NO_ROUTE_ROADS entries 0xFFFF: with n = 0 the index is road b, "no way".
+// The router loader's call (0x503DFC) is hooked to know the router, and its
+// one TaggedStream::ReadTag call (0x505084) to read 0x4206/0x4207 here; the
+// switch then takes them as unknown tags, as before. Marker
+// RRTR <race type | 1 << 16 if built> <n | rows << 16>.
+enum { ROUTER_LOAD_CALL = 0x00503DFC, ROUTER_LOAD = 0x00504E48,
+       ROUTER_TAG_CALL = 0x00505084, READ_TAG = 0x005B86F8,
+       RACE_CONFIG = 0x00619B10, RACE_TYPE = 0x18, NO_ROUTE_ROADS = 1024 };
+// capture_the_flag 10, survival 12, tag 13, keepaway 14, bomb_tag 15,
+// destroy 17, last_man_out 19, paint 20 (table 0x619C20)
+static const mc3_u32 BATTLE_TYPES = (1u << 10) | (1u << 12) | (1u << 13) | (1u << 14) |
+                                    (1u << 15) | (1u << 17) | (1u << 19) | (1u << 20);
+struct Router { mc3_u32 router, table, n, rows; };
+static Router g_router;
+static __attribute__((noinline)) Router *rt() { return &g_router; }
+
+static mc3_u32 race_type() {
+    const mc3_u32 cfg = *(volatile mc3_u32 *)RACE_CONFIG;
+    return (cfg >= 0x00100000u && cfg < 0x02000000u) ? *(volatile mc3_u32 *)(cfg + RACE_TYPE) : 0xFFu;
+}
+
+extern "C" int router_load_hook(mc3_u32 router, mc3_u32 tagged) {
+    Router *r = rt();
+    r->router = router; r->table = 0u; r->n = 0u; r->rows = 0u;
+    const int ok = MC3_CALL2(int, ROUTER_LOAD, mc3_u32, mc3_u32)(router, tagged);
+    if (!*(volatile mc3_u32 *)(router + 72u)) {          // no table in the file, or not built
+        const mc3_u32 none = MC3_CALL1(mc3_u32, VEC_NEW_ADDR, mc3_u32)(2u * NO_ROUTE_ROADS);
+        if (none) {
+            for (int i = 0; i < NO_ROUTE_ROADS; ++i) ((volatile unsigned short *)none)[i] = 0xFFFFu;
+            *(volatile mc3_u32 *)(router + 68u) = 0u;
+            *(volatile mc3_u32 *)(router + 72u) = none;
+        }
+    }
+    if (r->n) {
+        const mc3_u32 type = race_type();
+        mark('R','R','T','R', (type & 0xFFFFu) | (r->table ? 0x10000u : 0u), r->n | (r->rows << 16));
+    }
+    r->router = 0u;
+    return ok;
+}
+MC3_HOOK(ROUTER_LOAD_CALL, router_load_hook);
+
+extern "C" int router_tag_hook(mc3_u32 tagged, mc3_u32 tag_out, mc3_u32 len_out) {
+    const int got = MC3_CALL3(int, READ_TAG, mc3_u32, mc3_u32, mc3_u32)(tagged, tag_out, len_out);
+    Router *r = rt();
+    if (!got || !r->router) return got;
+    const mc3_u32 stream = *(volatile mc3_u32 *)tagged;
+    const unsigned tag = *(volatile unsigned short *)tag_out;
+    unsigned short n16 = 0;
+    if (tag == 0x4206u) {
+        MC3_CALL3(int, STREAM_READ, mc3_u32, mc3_u32, int)(stream, (mc3_u32)&n16, 2);
+        r->n = n16;
+        const mc3_u32 type = race_type();
+        if (n16 && type < 32u && (BATTLE_TYPES >> type) & 1u) {
+            r->table = MC3_CALL1(mc3_u32, VEC_NEW_ADDR, mc3_u32)(2u * n16 * n16);
+            if (r->table) {
+                *(volatile mc3_u32 *)(r->router + 68u) = n16;
+                *(volatile mc3_u32 *)(r->router + 72u) = r->table;
+            }
+        }
+    } else if (tag == 0x4207u && r->table && r->rows < r->n) {
+        MC3_CALL3(int, STREAM_READ, mc3_u32, mc3_u32, int)(stream, (mc3_u32)&n16, 2);
+        if (n16 == r->n) {
+            MC3_CALL3(int, STREAM_READ, mc3_u32, mc3_u32, int)
+                (stream, r->table + 2u * r->n * r->rows, (int)(2u * r->n));
+            ++r->rows;
+        }
+    }
+    return got;
+}
+MC3_HOOK(ROUTER_TAG_CALL, router_tag_hook);
+
+// The battle modes' route planner (sub_41B440, one 44-byte step per path
+// entry) gives a step on a road of type 0 or 4 the roads before and after it,
+// and asks sub_41B120 (road a, road b, out, max) for the nodes they share. A
+// path that ENDS on such a road - with MC2's files, the CTF/Detonator AI on
+// every map - has no road after it: b is null and sub_41B120 reads its node
+// count at address 4. PCSX2's recompiler reads 0 there (count 0: no shared
+// node, the AI drives on); a PS2 takes a TLB miss and stops. The three calls
+// (0x41C148, 0x41C164, 0x41C23C) answer 0 for a null road, as the emulator did.
+// Marker RNUL <calls with a null road> (first one only).
+enum { SHARED_NODES = 0x0041B120 };
+static mc3_u32 g_null_roads;
+static __attribute__((noinline)) mc3_u32 *null_roads() { return &g_null_roads; }
+extern "C" int shared_nodes_hook(mc3_u32 a, mc3_u32 b, mc3_u32 out, int max) {
+    if (!a || !b) {
+        if (!(*null_roads())++) mark('R','N','U','L', a, b);
+        return 0;
+    }
+    return MC3_CALL4(int, SHARED_NODES, mc3_u32, mc3_u32, mc3_u32, int)(a, b, out, max);
+}
+MC3_HOOK(0x0041C148, shared_nodes_hook);
+MC3_HOOK(0x0041C164, shared_nodes_hook);
+MC3_HOOK(0x0041C23C, shared_nodes_hook);
+
 extern "C" void mod_main() __attribute__((section(".text.start")));
 extern "C" void mod_main() { }

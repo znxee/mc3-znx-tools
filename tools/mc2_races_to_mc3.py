@@ -63,8 +63,14 @@ CAR_MAP = {
     'vp_jetta': 'vp_jetta_03', 'vp_saleen': 'vp_saleens7_04',
     'vp_cbr929a': 'vp_ninja_03', 'vp_gto': 'vp_gto_70',
     'vp_cop_l': 'vp_impalass_cop_s_96',
+    # Tokyo
+    'vp_mr2': 'vp_elise_04', 'vp_lexus': 'vp_is300_04',
+    'vp_nissanz': 'vp_350z_04', 'vp_supraa': 'vp_supra_98',
+    'vp_suprab': 'vp_supra_98', 'vp_lancer': 'vp_lancer_04',
+    'vp_yamaha': 'vp_ninja_03', 'vp_skylinea': 'vp_skyline_02',
+    'vp_tokyocop': 'vp_d_tokyo_cop_01',
 }
-COPS = {'vp_impalass_cop_s_96'}
+COPS = {'vp_impalass_cop_s_96', 'vp_d_tokyo_cop_01'}
 # MC2 race type -> (MC3 race type, folder)
 TYPES = {
     'cp_ordered': 'cp_ordered', 'cp_ordered_time_global': 'cp_ordered',
@@ -88,10 +94,14 @@ PREFIXES = {
     'losangeles': ('lamarc_battle_modes_la_', 'lachrisbeta_', 'lamaurobeta_', 'lachris_',
                    'lamauro_', 'lawc_', 'lawing_'),
     'paris': ('pariswingbeta_battle_modes_', 'parischris_', 'pariswing_', 'paris_'),
+    'tokyo': ('tokyowing_battle_modes_', 'tokyoarcade_', 'tokyochris_', 'tokyomauro_',
+              'tokyomarc_', 'tokyotroy_', 'tokyowing_', 'tokyo_'),
 }
 # battle map names: ctf_industrial -> "CTF Industrial", bt_full -> "Detonator Full"
 WORDS = {'ctf': 'CTF', 'bt': 'Detonator', 'full': 'Full Map', 'montmarte': 'Montmartre',
-         'leftbank': 'Left Bank', 'rightbank': 'Right Bank'}
+         'leftbank': 'Left Bank', 'rightbank': 'Right Bank',
+         'imperialpalace': 'Imperial Palace', 'worldchamptokyo': 'World Champ Tokyo',
+         'siderace': 'Side Race'}
 
 
 def display_name(key, mc2_city):
@@ -485,7 +495,9 @@ def main():
         done += 1
         print('  %-14s %-44s laps %d  opponents %d  %s %s  heights fixed %d'
               % (mc3_type, rel, laps, opponents, time, weather, moved[0]))
-    if add_types is None and a.city == a.mc2_city and converted_roam is not None:
+    # the city's Cruise starts where MC2's own roam does (also for a city
+    # registered under another MC3 name, as tokyo_mc2 for MC2's tokyo)
+    if add_types is None and converted_roam is not None:
         base = os.path.join(a.mc3, a.city, 'cruise', 'easy',
                             a.city + '_cruise_easy_cruise_race01')
         os.makedirs(os.path.dirname(base), exist_ok=True)

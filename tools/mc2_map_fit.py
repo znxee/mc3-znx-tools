@@ -32,9 +32,12 @@ ROAD_WORDS = ('road', 'cobble', 'alwaysdry', 'bridge', 'freeway', 'asphalt')
 SCALE = 2.0                       # metres per pixel of the world raster
 
 
-def lvl_extents(city):
+def lvl_extents(city, mc2=MC2):
     import re
-    t = open(os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'mc2/%s/city/%s.lvl') % (city, city)).read()
+    path = os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'mc2/%s/city/%s.lvl') % (city, city)
+    if not os.path.exists(path):        # cities never installed there (tokyo)
+        path = os.path.join(mc2, 'city', city, city + '.lvl')
+    t = open(path).read()
     lo = [float(v) for v in re.search(r'extents_min\s*\{\s*([^}]*)\}', t).group(1).split()]
     hi = [float(v) for v in re.search(r'extents_max\s*\{\s*([^}]*)\}', t).group(1).split()]
     return [lo[0], hi[0], lo[2], hi[2]]
@@ -191,7 +194,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
 
     rsc = R.Rsc(os.path.join(a.mc2, 'resource', a.city, a.city + '.rsc'))
-    ext = lvl_extents(a.city)
+    ext = lvl_extents(a.city, a.mc2)
     big = [ext[0] - 1500, ext[1] + 1500, ext[2] - 1500, ext[3] + 1500]
     if a.source == 'aib':
         lines = aib_lines(a.city, a.mc2)

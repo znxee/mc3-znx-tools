@@ -22,8 +22,9 @@ import subprocess
 import sys
 import time
 
-INI = os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'mc3boot.ini')
-RACE_DIR = os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'ASSETS/tune/race')
+ROOT = os.environ.get('MC3_HOSTFS', 'MC3HostFS')
+INI = os.path.join(ROOT, 'mc3boot.ini')
+RACE_DIR = os.path.join(ROOT, 'ASSETS', 'tune', 'race')
 LOG = os.path.join(os.environ.get('MC3_PCSX2_DATA', os.path.expanduser('~/Documents/PCSX2')), 'logs/cli_test.txt')
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -38,12 +39,19 @@ def races_from_locinf(city):
 
 
 def boot_section(ini_bytes, keys):
-    """Replace the [boot] section with `keys` (ordered). Keeps line endings."""
+    """Set `keys` (ordered) in the [boot] section; its other keys (mc2r, mc2e...)
+    are kept. Keeps line endings."""
     nl = b'\r\n' if b'\r\n' in ini_bytes else b'\n'
     i = ini_bytes.index(b'[boot]')
     j = ini_bytes.find(b'\n[', i + 1)
     tail = ini_bytes[j + 1:] if j >= 0 else b''
-    body = b''.join(('%s = %s' % kv).encode() + nl for kv in keys)
+    names = set(k for k, v in keys)
+    kept = []
+    for line in ini_bytes[i + 6:j + 1 if j >= 0 else len(ini_bytes)].splitlines():
+        s = line.strip()
+        if s and not s.startswith(b';') and b'=' in s and s.split(b'=')[0].strip().decode() not in names:
+            kept.append(s + nl)
+    body = b''.join(kept) + b''.join(('%s = %s' % kv).encode() + nl for kv in keys)
     return ini_bytes[:i] + b'[boot]' + nl + body + (nl + tail if tail else b'')
 
 
@@ -75,7 +83,14 @@ def main():
                          "frustum) is decided from the camera on screen")
     ap.add_argument('--follow', action='store_true',
                     help="the player's car hangs 30 m above the watched opponent (mc2s = <N>f)")
+    ap.add_argument('--root', default=ROOT, help='HostFS install (mc3boot.elf, mc3boot.ini, ASSETS)')
+    ap.add_argument('--add-mod', action='append', default=[],
+                    help="'name.mod = shim' line put in [mods] while the tour runs (e.g. race_nofe.mod = shim "
+                         "for an install that has no race_nofe enabled)")
     a = ap.parse_args()
+    global INI, RACE_DIR
+    INI = os.path.join(a.root, 'mc3boot.ini')
+    RACE_DIR = os.path.join(a.root, 'ASSETS', 'tune', 'race')
 
     races = [r for r in races_from_locinf(a.city) if r[1] != 'roam' and '\\mc2\\' in r[0]]
     if a.races:
@@ -93,7 +108,12 @@ def main():
             keys = [('rnam', short), ('rscw', 1), ('city', a.city), ('time', tod),
                     ('weather', weather), ('racetype', rtype), ('car', a.car),
                     ('mc2s', '%d%s' % (a.spectate, 'c' if a.chase else 'f' if a.follow else '')), ('nofe', 1)]
-            open(INI, 'wb').write(boot_section(original, keys))
+            ini = boot_section(original, keys)
+            if a.add_mod:
+                nl = b'\r\n' if b'\r\n' in ini else b'\n'
+                k = ini.index(b'[mods]') + len(b'[mods]') + len(nl)
+                ini = ini[:k] + b''.join(m.encode() + nl for m in a.add_mod) + ini[k:]
+            open(INI, 'wb').write(ini)
             at = []
             t = a.start
             while t <= a.seconds:
@@ -101,6 +121,7 @@ def main():
                 t += a.every
             print('%s  (%s, %s %s)' % (name, rtype, tod, weather), flush=True)
             subprocess.run([sys.executable, os.path.join(HERE, 'mc3_pcsx2_shots.py'),
+                            '--elf', os.path.join(a.root, 'mc3boot.elf'),
                             '--at'] + at + ['--out', out],
                            check=True, timeout=a.seconds + 120)
             if os.path.exists(LOG):
