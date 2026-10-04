@@ -122,6 +122,13 @@ MC3_HOOK(LOAD_RAIL_NETWORK_CALL, load_rail_network_hook);
 // a race type whose AI routes (BATTLE_TYPES); otherwise n stays 0 and the
 // table is a 2 KB block from the same heap (the router frees it as its own)
 // of NO_ROUTE_ROADS entries 0xFFFF: with n = 0 the index is road b, "no way".
+// Both are made like the loader's own table (0x505018): the entries are an
+// array of a class with a destructor, so the block is new[] with a 16-byte
+// cookie - vec_new(16 + 2*count), count at +0, table = block + 16. The
+// router's destructor (sub_5050C0, on every city unload: back to the menu,
+// Next Race) reads the count at table-16 and frees table-16; a table without
+// the cookie handed the allocator a pointer inside a block and it stopped in
+// memMemoryAllocator::Free's `while (1)` (0x3B0558).
 // The router loader's call (0x503DFC) is hooked to know the router, and its
 // one TaggedStream::ReadTag call (0x505084) to read 0x4206/0x4207 here; the
 // switch then takes them as unknown tags, as before. Marker
@@ -137,6 +144,14 @@ struct Router { mc3_u32 router, table, n, rows; };
 static Router g_router;
 static __attribute__((noinline)) Router *rt() { return &g_router; }
 
+// new[] of `count` u16 entries with the cookie the router's destructor expects.
+static mc3_u32 new_table(mc3_u32 count) {
+    const mc3_u32 block = MC3_CALL1(mc3_u32, VEC_NEW_ADDR, mc3_u32)(16u + 2u * count);
+    if (!block) return 0u;
+    *(volatile mc3_u32 *)block = count;
+    return block + 16u;
+}
+
 static mc3_u32 race_type() {
     const mc3_u32 cfg = *(volatile mc3_u32 *)RACE_CONFIG;
     return (cfg >= 0x00100000u && cfg < 0x02000000u) ? *(volatile mc3_u32 *)(cfg + RACE_TYPE) : 0xFFu;
@@ -147,7 +162,7 @@ extern "C" int router_load_hook(mc3_u32 router, mc3_u32 tagged) {
     r->router = router; r->table = 0u; r->n = 0u; r->rows = 0u;
     const int ok = MC3_CALL2(int, ROUTER_LOAD, mc3_u32, mc3_u32)(router, tagged);
     if (!*(volatile mc3_u32 *)(router + 72u)) {          // no table in the file, or not built
-        const mc3_u32 none = MC3_CALL1(mc3_u32, VEC_NEW_ADDR, mc3_u32)(2u * NO_ROUTE_ROADS);
+        const mc3_u32 none = new_table(NO_ROUTE_ROADS);
         if (none) {
             for (int i = 0; i < NO_ROUTE_ROADS; ++i) ((volatile unsigned short *)none)[i] = 0xFFFFu;
             *(volatile mc3_u32 *)(router + 68u) = 0u;
@@ -175,7 +190,7 @@ extern "C" int router_tag_hook(mc3_u32 tagged, mc3_u32 tag_out, mc3_u32 len_out)
         r->n = n16;
         const mc3_u32 type = race_type();
         if (n16 && type < 32u && (BATTLE_TYPES >> type) & 1u) {
-            r->table = MC3_CALL1(mc3_u32, VEC_NEW_ADDR, mc3_u32)(2u * n16 * n16);
+            r->table = new_table((mc3_u32)n16 * n16);
             if (r->table) {
                 *(volatile mc3_u32 *)(r->router + 68u) = n16;
                 *(volatile mc3_u32 *)(r->router + 72u) = r->table;
