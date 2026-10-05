@@ -29,6 +29,7 @@
 //  Markers: RMMP <city> <texture>  (first time a city's map is asked for)
 // -----------------------------------------------------------------------------
 #include "../../payload/mc3_mod.h"
+#include "../../payload/mc3_registry.h"
 #include "../../payload/mc3_heap.h"
 #include "../mc2_city_config.h"
 
@@ -68,6 +69,32 @@ static mc3_u32 current_city() {
     return mc3_ptr_ok(cfg) ? word(cfg) : 0xFFFFFFFFu;
 }
 
+// The textures this module made (rmcTexturePS2, 0x10140 bytes with the image
+// for a 512x256 4-bit map) were kept for the whole session. Each is created the
+// first time the HUD asks, in the middle of a race, when the main heap's cursor
+// is high - and stayed there: after Los Angeles, Paris and Tokyo MC2 three of
+// them pinned the cursor so high that the front end's 1.1 MB LoadHeap no longer
+// fit under the top ("not enough main heap memory for memtop heap", then a
+// null heap and the menu never came back, 2026-10-04). They are destroyed
+// (virtual dtor, slot +8, flag 3 - the dtor also takes them out of the texture
+// factory's name table) when the race is left: release_textures() is exported
+// in mc3boot's registry as 'MMRL' and the renderer's front-end hook calls it,
+// and the same happens when a retail city asks (it used to forget them).
+// Marker RMMR <textures destroyed>.
+enum { TEXTURE_VTABLE = 0x00627280 };
+extern "C" void release_textures(void) {
+    State *s = st();
+    mc3_u32 n = 0;
+    for (mc3_u32 i = 0; i < MAX_CITY; ++i) {
+        const mc3_u32 t = s->texture[i];
+        s->texture[i] = 0u;
+        if (!mc3_ptr_ok(t) || word(t) != (mc3_u32)TEXTURE_VTABLE) continue;
+        MC3_CALL2(void, word(TEXTURE_VTABLE + 8u), mc3_u32, int)(t, 3);
+        ++n;
+    }
+    if (n) mark('R','M','M','R', n, 0u);
+}
+
 // "hud_map_<name>" through mcTextureFactory, once per city
 static mc3_u32 city_map(mc3_u32 city) {
     State *s = st();
@@ -89,14 +116,15 @@ static mc3_u32 city_map(mc3_u32 city) {
 }
 
 extern "C" mc3_u32 map_lookup_hook(mc3_u32 streamed, mc3_u32 index, mc3_u32 locked) {
+    // exported from here: a shim module's mod_main never runs
+    mc3_export(MC3_ID('M','M','R','L'), (void *)&release_textures);
     const mc3_u32 city = current_city();
     if (city >= FIRST_ADDED_CITY && city < MAX_CITY) {
         const mc3_u32 t = city_map(city);
         if (t) return t;
     } else {
-        // a retail city: forget ours, the factory's caches may be reset
-        // before the next visit
-        for (mc3_u32 i = 0; i < MAX_CITY; ++i) st()->texture[i] = 0u;
+        // a retail city: ours are not needed any more
+        release_textures();
     }
     return MC3_CALL3(mc3_u32, MAP_LOOKUP, mc3_u32, mc3_u32, mc3_u32)(streamed, index, locked);
 }
@@ -135,4 +163,4 @@ MC3_HOOK(0x00286988, map_entry_hook);
 MC3_HOOK(0x00286C28, map_entry_hook);
 
 extern "C" void mod_main() __attribute__((section(".text.start")));
-extern "C" void mod_main() { }
+extern "C" void mod_main() { mc3_export(MC3_ID('M','M','R','L'), (void *)&release_textures); }

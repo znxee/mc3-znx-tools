@@ -110,6 +110,9 @@ def main():
                     help='write this staged file (8.3 name, e.g. MC2.DAT) before the others')
     ap.add_argument('--expand', dest='expand', action='store_true',
                     help='grow the ISO volume up to DVD5 if the new tail does not fit')
+    ap.add_argument('--no-dvd-limit', action='store_true',
+                    help='accept a layer 0 larger than DVD5 (OPL/PCSX2; '
+                         'the image no longer fits a burned disc)')
     args = ap.parse_args()
 
     staged = []
@@ -197,7 +200,7 @@ def main():
                     f'the tail needs {cursor-total} sectors past the volume; '
                     'repeat with --expand')
             target_total = cursor + old_slack
-            if target_total > DVD5_SECTORS:
+            if target_total > DVD5_SECTORS and not args.no_dvd_limit:
                 raise SystemExit(
                     f'the expanded volume would have {target_total * SECTOR} bytes, '
                     f'above the DVD5 limit of {DVD5_BYTES}')

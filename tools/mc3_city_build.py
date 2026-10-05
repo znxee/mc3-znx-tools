@@ -1639,7 +1639,18 @@ def build(out_path, donor, blocks, hood_name='zz', position=(0.0, 0.0, 0.0),
         if i == 0:
             struct.pack_into('<I', ent, 4, 1)   # only the first one gets the model
         entries += ent
-    off_ent = e.put(bytes(entries), 'hoods')
+    # THE new[] COOKIE BEFORE THE HOOD ARRAY. mcCity's destructor (slot +8,
+    # called by mcCity::Delete 0x2575C0 when the city is unloaded WHOLE) reads
+    # the count at hoods-16 and calls mcHood::dtor on every 20-byte entry, last
+    # to first. Without a cookie it was whatever sat there: Paris 0x80000000
+    # (x20 wraps to 0, no dtor - worked by luck), LA 1 (hood 0 only, empty),
+    # Tokyo MC2 0xCDCD0008 - the loop walked garbage and stopped in
+    # mcHood::DeleteModels 0x25D418 (exit to the frontend through the San Diego
+    # path). Count 0, what Paris does in practice: the hoods live inside the
+    # .pck and the game frees the pck with paging off.
+    off_cookie = e.put(struct.pack('<I', 0) + b'\xCD' * 12 + bytes(entries), 'hoods_cookie')
+    off_ent = off_cookie + 16
+    e.label('hoods', off_ent)
     empty = empty_hood(e)
     for i in range(len(hood_names)):
         e.point(off_ent + HOOD_ENTRY_SIZE * i + 0, 'hood_rec%d' % i)

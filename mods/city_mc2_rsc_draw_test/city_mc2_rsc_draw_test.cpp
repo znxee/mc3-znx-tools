@@ -5668,6 +5668,16 @@ MC3_HOOK(SET_CAMERA_HOOK, set_camera_hook);
 // the same place in both cities, and fe_transition aims the camera at it.
 // No San Diego reload, so no 2.26 MB props block to fit (LAN), and nothing
 // to unload twice. [boot] fesd = 1 brings back the San Diego fallback below.
+// The empty city needs room: EnterStateMC3Frontend creates its NetHeap (300
+// KB) and LoadHeap (1.1 MB) from the top of the main heap, above the cursor,
+// with the city's layers still loaded. After several cities the cursor sits
+// high (a 64 KB stream buffer pinned it above a 900 KB hole: Tokyo MC2 after
+// Paris left 0.95-1.1 MB), CreateMemTopHeap printed "not enough main heap
+// memory for memtop heap", returned 0 and the game allocated from a null heap
+// (TLB misses at 0x3AFE40, menu never back). So with less than FE_EMPTY_ROOM
+// above the cursor once this renderer is released, this exit takes the San
+// Diego fallback - the city is unloaded whole. Marker RFEM <city> <room>.
+enum { FE_EMPTY_ROOM = 0x180000 };      // the two memtop heaps (0x15E020) + margin
 // Marker RFEE <city> <blocks>.
 // netManager +16 is the session: 0 in LAN, -1 outside a network game.
 enum { NET_MANAGER = 0x00619D5C, MOVE_FE_CAMERA_GUARD = 0x003396C0,
@@ -5706,6 +5716,13 @@ static void open_move_fe_camera_guard() {
 }
 
 extern "C" mc3_u32 frontend_hook(mc3_u32 game_state) {
+    // the minimap module's textures go before anything is measured (see
+    // release_textures in the minimap module: they pin the heap's top)
+    {
+        typedef void (*release_fn)(void);
+        const release_fn mm = (release_fn)mc3_import(MC3_ID('M','M','R','L'));
+        if (mm) mm();
+    }
     Tracked *t = trk();
     const mc3_u32 blocks = t->n;
     props_restore();
@@ -5727,7 +5744,10 @@ extern "C" mc3_u32 frontend_hook(mc3_u32 game_state) {
     if (t->active || st()) { release_all(); t->active = 0u; }
     {
         const char *fesd = mc3_bootarg(MC3_ID('f','e','s','d'));
-        if (from_added && !(fesd && fesd[0] == '1')) {          // the empty city
+        const mc3_u32 room = mc3_heap_free(mc3_heap_active());
+        const int fits = room >= (mc3_u32)FE_EMPTY_ROOM;
+        if (from_added && !fits) mark('R','F','E','M', from_city, room);
+        if (from_added && fits && !(fesd && fesd[0] == '1')) {  // the empty city
             open_move_fe_camera_guard();
             mark('R','F','E','E', from_city, blocks);
             return MC3_CALL1(mc3_u32, ENTER_FRONTEND, mc3_u32)(game_state);

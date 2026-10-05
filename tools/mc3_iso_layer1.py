@@ -31,6 +31,9 @@ def main():
     ap.add_argument('rebuilt')
     ap.add_argument('clean')
     ap.add_argument('--apply', action='store_true')
+    ap.add_argument('--no-layer-limit', action='store_true',
+                    help='accept a layer 0 longer than a DVD9 layer (OPL/PCSX2 read it; '
+                         'the image no longer fits a burned disc)')
     a = ap.parse_args()
 
     with open(a.clean, 'rb') as c:
@@ -43,7 +46,7 @@ def main():
         v_new = pvd_volume(r, 16)
     if not v_new:
         raise SystemExit('rebuilt image: no PVD at sector 16')
-    if v_new > LAYER_MAX:
+    if v_new > LAYER_MAX and not a.no_layer_limit:
         raise SystemExit(f'layer 0 has {v_new} sectors, a DVD9 layer holds {LAYER_MAX}')
     start = v_new - 16
     print(f'layer 1: clean sectors {l1_from}..{l1_from + l1_count} -> rebuilt {start}..{start + l1_count}')

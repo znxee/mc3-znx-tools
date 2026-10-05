@@ -25,7 +25,7 @@ on it; see [Requirements](#requirements).
 | `tools/reshade_telemetry/` | PINE client for the `mc3_telemetry` module's mailbox |
 | `tools/ghidra_scripts/` | two small Ghidra exporters |
 | `audio/` | music/stream tools: RSTM conversion, the music manager, engine-sound curve editors |
-| `docs/` | format notes and ImHex patterns (`*.hexpat`) for city and vehicle `.pck` files, both on disk and live in RAM, plus `lint_hexpat.py` |
+| `docs/` | format notes and ImHex patterns (`*.hexpat`) for city and vehicle `.pck` files, both on disk and live in RAM, plus `lint_hexpat.py`; `CITY_CONVENTION.md`: the rules an added city follows so it does not break the next one (slots, shell, top of the heap, the required test) |
 | `mods/` | C++ source of runtime modules for the modloader: diagnostic probes, the freecam, widescreen, HUD, city-porting experiments |
 | `research/` | one-off analysis scripts from the city-porting work, kept as a record of how results were obtained |
 
@@ -63,6 +63,14 @@ the finding behind the tool, and `python TOOL.py --help` lists its options.
   For a disc image, `tools/mc3_iso_repack_root.py` writes the root files
   (MC2.DAT included) and `tools/mc3_iso_layer1.py` puts MC3 Remix's second
   layer (the VIDEO folder) back behind the rebuilt first one.
+  With `MC2.DAT` and MCLA's `PSPASSET.DAT` both in the root, layer 0 outgrows
+  a DVD9 layer: `--no-dvd-limit` and `--no-layer-limit` accept it (OPL and
+  PCSX2 read the image; it no longer fits a burned disc).
+- Menu-driven tests: `tools/mc3_pcsx2_drive.py` plays a script of steps;
+  with the `menu_state` module loaded (`defer`) its `until`/`select`/`push`
+  steps read the menu through PINE (`tools/mc3_menu_state.py`) instead of
+  counting presses. `tools/mc3_city_check.py` checks an install's city
+  shells against `docs/CITY_CONVENTION.md`.
 - `audio/mc3_music_core.py` also needs Edness's `MclHash.py` and `strtbl.py`
   on the Python path; they are not redistributed here.
 - Before trying a change on a real PS2, `tools/mc3_pcsx2_accurate.py on` puts
