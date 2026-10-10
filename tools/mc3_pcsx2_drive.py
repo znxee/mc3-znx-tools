@@ -25,7 +25,10 @@ mc3_menu_state.py). TEXT is matched case-insensitively against the selected
 row (`=TEXT`: the whole row, so =ordered_race is not Unordered Race);
 `row:TEXT` against every row of the active menu; `state:N` is the menu
 shell's screen number (print it with `menu`). Use _ for a space
-("select go_to_menus"). If a condition fails the run stops there and
+("select go_to_menus").
+`game:N` reads the retail mcGameState (+4): 5 is the garage, where the
+menu shell's published state can remain at the preceding confirmation box.
+If a condition fails the run stops there and
 prints what the menu showed.
     menu                  print the menu state
     until TEXT [S]        wait until TEXT matches (default 60 s)
@@ -35,6 +38,14 @@ prints what the menu showed.
                           times (default 10) - for screens that take input late
                           or have no list (the title: `push cross havefun`)
     expect TEXT           stop unless TEXT matches now
+    peek BASE [+OFF ...]  print the word at BASE and the words at *BASE + OFF
+                          (e.g. `peek 0x619B10 0 12 16`: the race config's
+                          city, traffic and pedestrian density)
+    probe NAME            write OUT/NAME.json using --probe-module read(pine)
+    expect-probe PATH=VALUE  assert a dotted diagnostic path (JSON scalar value)
+    seek-probe BUTTON PATH=VALUE [N]  tap until the diagnostic matches
+    follow FILE [S]       wait for a JSON list of more steps, then execute it
+                          (default 120 s; shares the current PINE connection)
 Screens seen (state numbers): 41 title "PRESS START", 40 profiles, 20 main
 menu. --skip-fmv and --add-mod 'frontend_no_timeout.mod = defer' make the boot
 fast and keep the title from falling back to the attract video.
@@ -44,6 +55,9 @@ is ADDED to [Pad1] of PCSX2.ini next to each SDL one (PCSX2 keeps several
 bindings per button as repeated keys). The .ini is copied first and put back
 at the end, also on error or Ctrl+C. Keep the machine idle: keys go to the
 focused window and screenshots grab the screen region (see mc3_pcsx2_shots).
+--datapath ROOT isolates the INI at ROOT/PCSX2/inis/PCSX2.ini; configure its
+writable folders and cloned cards before starting. A failed focus request or
+early emulator exit stops the script and restores the files changed by it.
 """
 import argparse
 import os
@@ -124,14 +138,40 @@ def key(vk, extended, down):
 
 def focus(pid):
     wins = S.windows_of(pid)
-    if wins:
-        S.user32.SetForegroundWindow(wins[0][1])
+    if not wins:
+        raise StepFailed('No PCSX2 render window for controller input')
+    hwnd = wins[0][1]
+    S.user32.GetForegroundWindow.restype = S.wt.HWND
+    msg = S.wt.MSG()
+    S.user32.PeekMessageW(S.ctypes.byref(msg),None,0,0,0)
+    foreground = S.user32.GetForegroundWindow()
+    current = S.ctypes.windll.kernel32.GetCurrentThreadId()
+    threads = {S.user32.GetWindowThreadProcessId(hwnd,None)}
+    if foreground: threads.add(S.user32.GetWindowThreadProcessId(foreground,None))
+    attached = []
+    try:
+        for thread in threads:
+            if thread != current and S.user32.AttachThreadInput(current,thread,True):
+                attached.append(thread)
+        S.user32.ShowWindow(hwnd,9)
+        S.user32.BringWindowToTop(hwnd)
+        S.user32.SetForegroundWindow(hwnd)
+        S.user32.SetFocus(hwnd)
+        time.sleep(0.1)
+    finally:
+        for thread in attached: S.user32.AttachThreadInput(current,thread,False)
+    if S.user32.GetForegroundWindow() != hwnd:
+        raise StepFailed('Cannot focus PCSX2 (target %r, foreground %r)' %
+                         (hwnd,S.user32.GetForegroundWindow()))
+    time.sleep(0.05)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     ap.add_argument('--elf', default=os.path.join(os.environ.get('MC3_HOSTFS', 'MC3HostFS'), 'mc3boot.elf'))
     ap.add_argument('--out', required=True)
+    ap.add_argument('--datapath', help='private PCSX2 profile root (INI at PCSX2/inis/PCSX2.ini)')
+    ap.add_argument('--probe-module', help='local diagnostic module exposing read(pine); used by probe NAME')
     ap.add_argument('--statefile', help='start from this .p2s instead of booting (pcsx2 -statefile)')
     ap.add_argument('--iso', help='boot this disc image instead of --elf')
     ap.add_argument('--gui', action='store_true', help='run with the main window (no -batch -nogui)')
@@ -151,6 +191,7 @@ def main():
                     help="KEY=VALUE put in [boot] of the mc3boot.ini next to --elf for the run (e.g. fesd=1)")
     ap.add_argument('steps', nargs='+')
     a = ap.parse_args()
+    ini = os.path.join(os.path.abspath(a.datapath), 'PCSX2', 'inis', 'PCSX2.ini') if a.datapath else INI
     os.makedirs(a.out, exist_ok=True)
     root = os.path.dirname(os.path.abspath(a.elf))
     videos = [os.path.join(root, 'ASSETS', 'VIDEO', n + '.PSS')
@@ -159,6 +200,12 @@ def main():
     boot_ini_text = None
     port = a.pine_port or (28012 if port_in_use(28011) else 28011)
     menu = [None]
+    probe_module = None
+    if a.probe_module:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('drive_probe', a.probe_module)
+        probe_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe_module)
 
     def state(timeout=90.0):
         """The menu state; waits for PINE and the module up to `timeout` s."""
@@ -203,19 +250,25 @@ def main():
     def text_of(word):
         return word.replace('_', ' ')
 
-    backup = INI + '.drive_backup'
-    shutil.copy2(INI, backup)
+    backup = ini + '.drive_backup'
+    if os.path.exists(backup):
+        raise SystemExit('Existing drive backup; restore it before another run: ' + backup)
+    shutil.copy2(ini, backup)
     p = None
+    renamed_videos = []
     try:
-        text = open(INI, encoding='utf-8').read()
+        text = open(ini, encoding='utf-8').read()
         text = add_keyboard(text)
         text = set_pine(text, port)
         if a.no_hostfs:
             text = text.replace('HostFs = true', 'HostFs = false')
-        open(INI, 'w', encoding='utf-8').write(text)
+        open(ini, 'w', encoding='utf-8').write(text)
         for v in videos:
             if os.path.exists(v):
+                if os.path.exists(v + '.off'):
+                    raise StepFailed('Intro backup already exists: ' + v + '.off')
                 os.replace(v, v + '.off')
+                renamed_videos.append(v)
         if (a.add_mod or a.boot) and os.path.exists(boot_ini):
             boot_ini_text = open(boot_ini, 'rb').read()
             nl = b'\r\n' if b'\r\n' in boot_ini_text else b'\n'
@@ -228,7 +281,10 @@ def main():
                 text_b = text_b[:k] + b''.join(
                     ('%s = %s' % tuple(kv.split('=', 1))).encode() + nl for kv in a.boot) + text_b[k:]
             open(boot_ini, 'wb').write(text_b)
-        cmd = [S.PCSX2, '-logfile', S.LOG] if a.gui else [S.PCSX2, '-batch', '-nogui', '-logfile', S.LOG]
+        log = os.path.join(os.path.abspath(a.out), 'pcsx2.log') if a.datapath else S.LOG
+        cmd = [S.PCSX2, '-logfile', log] if a.gui else [S.PCSX2, '-batch', '-nogui', '-logfile', log]
+        if a.datapath:
+            cmd += ['-datapath', os.path.abspath(a.datapath)]
         if a.statefile:
             cmd += ['-statefile', a.statefile]
         if a.disc and not a.iso:
@@ -238,10 +294,11 @@ def main():
         p = subprocess.Popen(cmd,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         t0 = time.time()
-        for step in a.steps:
+        steps = list(a.steps)
+        for step_index, step in enumerate(steps):
             w = step.split()
             if p.poll() is not None:
-                print('  PCSX2 exited'); break
+                raise StepFailed('PCSX2 exited before step: ' + step)
             if w[0] == 'wait':
                 time.sleep(float(w[1]))
             elif w[0] in ('press', 'hold'):
@@ -284,6 +341,61 @@ def main():
                 print('  %5.1fs  savestate -> %s' % (time.time() - t0, S.save_state(p.pid)))
             elif w[0] == 'menu':
                 print('  %5.1fs  %s' % (time.time() - t0, str(state()).replace('\n', '\n         ')))
+            elif w[0] == 'probe':
+                if probe_module is None:
+                    raise StepFailed('probe requires --probe-module')
+                import json
+                state()
+                path = os.path.join(a.out, w[1] + '.json')
+                with open(path, 'w', encoding='utf-8') as stream:
+                    json.dump(probe_module.read(menu[0].pine), stream, indent=2)
+                    stream.write('\n')
+                print('  %5.1fs  probe %s' % (time.time() - t0, path))
+            elif w[0] == 'seek-probe':
+                if probe_module is None:
+                    raise StepFailed('seek-probe requires --probe-module')
+                button, expression = w[1], w[2]
+                path, expected = expression.split('=', 1)
+                limit = int(w[3]) if len(w)>3 else 60
+                state()
+                def value():
+                    item = probe_module.read(menu[0].pine)
+                    for part in path.split('.'):
+                        item = item.get(part) if isinstance(item, dict) else item[int(part)] if isinstance(item,list) else None
+                    return str(item)
+                for attempt in range(limit+1):
+                    actual = value()
+                    if actual == expected:
+                        break
+                    if attempt == limit:
+                        raise StepFailed('seek-probe %s: got %r after %d presses' % (expression,actual,limit))
+                    print('         seek-probe %d: %s' % (attempt,actual))
+                    tap(button)
+                    time.sleep(4.0)
+                print('  %5.1fs  seek-probe %s: ok (%d presses)' % (time.time()-t0,expression,attempt))
+            elif w[0] == 'expect-probe':
+                if probe_module is None:
+                    raise StepFailed('expect-probe requires --probe-module')
+                state()
+                path, expected = w[1].split('=',1)
+                item = probe_module.read(menu[0].pine)
+                for part in path.split('.'):
+                    item = item.get(part) if isinstance(item,dict) else item[int(part)] if isinstance(item,list) else None
+                if str(item) != expected:
+                    raise StepFailed('expect-probe %s: got %r' % (w[1],item))
+                print('  %5.1fs  expect-probe %s: ok' % (time.time()-t0,w[1]))
+            elif w[0] == 'follow':
+                import json
+                end = time.time() + (float(w[2]) if len(w)>2 else 120)
+                print('  %5.1fs  waiting for steps: %s' % (time.time()-t0,w[1]))
+                while not os.path.isfile(w[1]):
+                    if p.poll() is not None or time.time()>end:
+                        raise StepFailed('follow: no step file before timeout: ' + w[1])
+                    time.sleep(0.2)
+                with open(w[1],encoding='utf-8') as stream: next_steps=json.load(stream)
+                if not isinstance(next_steps,list) or not all(isinstance(s,str) for s in next_steps):
+                    raise StepFailed('follow file must be a JSON list of step strings')
+                steps[step_index+1:step_index+1] = next_steps
             elif w[0] == 'until':
                 want, limit = text_of(w[1]), float(w[2]) if len(w) > 2 else 60.0
                 end = time.time() + limit
@@ -292,6 +404,16 @@ def main():
                         raise StepFailed('until %s: not after %g s\n%s' % (want, limit, state()))
                     time.sleep(0.2)
                 print('  %5.1fs  until %s: ok' % (time.time() - t0, want))
+            elif w[0] == 'peek':                # peek BASE [+OFF ...]: words at *BASE + OFF
+                state()
+                pine = menu[0].pine
+                base = int(w[1], 0)
+                ptr = pine.read32(base)
+                vals = ['*%#x = %08x' % (base, ptr)]
+                for off in w[2:]:
+                    o = int(off, 0)
+                    vals.append('+%#x = %08x' % (o, pine.read32(ptr + o) if 0x100000 <= ptr < 0x2000000 else 0))
+                print('  %5.1fs  peek %s' % (time.time() - t0, '  '.join(vals)))
             elif w[0] == 'lists':               # every list menu, for finding what is where
                 state()
                 for i, m, inp, vis, page, row, rows, text in menu[0].lists():
@@ -352,11 +474,11 @@ def main():
         if p is not None and p.poll() is None:
             p.kill()
             p.wait()
-        shutil.copy2(backup, INI)
+        shutil.copy2(backup, ini)
         os.remove(backup)
         if boot_ini_text is not None:
             open(boot_ini, 'wb').write(boot_ini_text)
-        for v in videos:
+        for v in renamed_videos:
             if os.path.exists(v + '.off') and not os.path.exists(v):
                 os.replace(v + '.off', v)
 

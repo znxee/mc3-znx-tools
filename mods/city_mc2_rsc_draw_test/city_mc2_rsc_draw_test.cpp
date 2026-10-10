@@ -275,7 +275,7 @@ struct State {
     mc3_u32 cpvs_state, cpvs_stream, cpvs_mem, cpvs, cpvs_bytes;
     mc3_u32 cpvs_count, cpvs_error, cpvs_reported, palette;
     mc3_u32 cpvs_table, cpvs_table_mem, cpvs_pos, cpvs_index, cpvs_kept, cpvs_fill;
-    mc3_u32 cpvs_palette_index, cpvs_fourcc_last;
+    mc3_u32 cpvs_palette_index, cpvs_fourcc_last, cpvs_retry;
     mc3_u32 cpvs_need[MAX_CPVS_ENTRIES / 32];
     mc3_u32 map_error, map_reported, heap_reported, heap_min;
     mc3_u32 rsc_state, rsc_stream, rsc_size, rsc_count, rsc_cursor;
@@ -3915,17 +3915,55 @@ static float card_distance() {
     while (v && *v >= '0' && *v <= '9') n = n * 10u + (mc3_u32)(*v++ - '0');
     return n >= 10u && n <= 2000u ? (float)n : 200.0f;
 }
+// The CPVS copy is one block, freed whole when the city goes. It takes a
+// smaller margin than HEAP_MARGIN: measured on the disc after two San Diego
+// fallbacks, Tokyo MC2's 1.95 MB copy met a 2.17 MB largest block - it fits
+// with 220 KB to spare, HEAP_MARGIN (320 KB) refused it and the city went
+// without vertex colours.
+enum { CPVS_MARGIN = 0x20000 };
+static int cpvs_room(mc3_u32 bytes) {
+    return mc3_heap_largest(mc3_heap_active()) >= bytes + CPVS_MARGIN;
+}
+static mc3_u32 open_cpvs() {
+    char path[96];
+    int n = append(path, 0, cpvs_folder());
+    n = append(path, n, cond_time());
+    path[n++] = '_'; path[n] = 0;
+    n = append(path, n, cond_weather());
+    append(path, n, cpvs_suffix());
+    return stream_open(path);
+}
+// CPVS that did not fit (error 7) is not final: the directory stays parsed in
+// the table, and every RETRY_FRAMES of the race the copy is tried again - the
+// heap after a San Diego fallback (two in a row: Los Angeles and Paris left
+// for the front end short of room) had no 1.9 MB block for Tokyo MC2's while
+// loading, and the city went without vertex colours.
+// Marker RCPL <bytes> <largest free block> on each failure, RCPR <bytes>
+// <retries> when it finally fits.
+static void retry_cpvs() {
+    State *s = st();
+    if (s->cpvs_state != 5u || ++s->cpvs_retry % RETRY_FRAMES) return;
+    if (!cpvs_room(s->cpvs_kept + 16u)) return;
+    const mc3_u32 h = open_cpvs();
+    if (!h) return;
+    mc3_u8 *mem = (mc3_u8 *)r_alloc(s->cpvs_kept + 16u);
+    if (!mem) { stream_close(h); return; }
+    s->cpvs_stream = h;
+    s->cpvs_mem = (mc3_u32)mem;
+    s->cpvs = ((mc3_u32)mem + 15u) & ~15u;
+    s->cpvs_pos = 0u;
+    s->cpvs_fill = 0u;
+    s->cpvs_index = 0u;
+    s->cpvs_error = 0u;
+    s->cpvs_reported = 0u;
+    s->cpvs_state = 4u;
+    mark('R','C','P','R', s->cpvs_kept, s->cpvs_retry / RETRY_FRAMES);
+}
 static void step_cpvs() {
     State *s = st();
     mc3_u8 scratch[2048] __attribute__((aligned(16)));
     if (s->cpvs_state == 0u) {
-        char path[96];
-        int n = append(path, 0, cpvs_folder());
-        n = append(path, n, cond_time());
-        path[n++] = '_'; path[n] = 0;
-        n = append(path, n, cond_weather());
-        append(path, n, cpvs_suffix());
-        const mc3_u32 h = stream_open(path);
+        const mc3_u32 h = open_cpvs();
         if (!h) { s->cpvs_error = 1u; s->cpvs_state = 3u; return; }
         const int size = stream_size(h);
         mc3_u8 header[16] __attribute__((aligned(16)));
@@ -3988,14 +4026,21 @@ static void step_cpvs() {
         if (!s->cpvs_error && (s->cpvs_palette_index >= count ||
                                !(table[s->cpvs_palette_index] & 0x80000000u)))
             s->cpvs_error = 6u;
-        mc3_u8 *mem = !s->cpvs_error && heap_room(kept + 16u)
+        mc3_u8 *mem = !s->cpvs_error && cpvs_room(kept + 16u)
             ? (mc3_u8 *)r_alloc(kept + 16u) : 0;
         if (!mem) {
+            const int no_room = !s->cpvs_error;
             if (!s->cpvs_error) s->cpvs_error = 7u;
             s->cpvs_bytes = kept;
             stream_close(s->cpvs_stream);
             s->cpvs_stream = 0u;
             s->cpvs_state = 3u;
+            if (no_room) {                     // only memory missing: retry_cpvs
+                s->cpvs_kept = kept;
+                s->cpvs_retry = 0u;
+                s->cpvs_state = 5u;
+                mark('R','C','P','L', kept, mc3_heap_largest(mc3_heap_active()));
+            }
             return;
         }
         s->cpvs_mem = (mc3_u32)mem;
@@ -5160,14 +5205,13 @@ static void draw_instance_plain(mc3_u32 i, mc3_u32 arena) {
     for (mc3_u32 j = 0; j < model->count; ++j)
         queue_piece(&s->pieces[model->pieces[j]], arena);
 }
-static void reflect_mask_pass(mc3_u32 arena) {
-    State *s = st();
-    if (!reflect_mask_enabled()) return;
-    const mc3_u32 ctx = *(volatile mc3_u8 *)GS_CONTEXT;
+// The frame's alpha, all of it, to 0: a screen sprite writing alpha only, no
+// Z. Leaves FRAME writing alpha only - the caller puts MC3's mask back.
+static int clear_frame_alpha(mc3_u32 arena, mc3_u32 ctx) {
     mc3_u32 flo, fhi;
     frame_reg(&flo, &fhi, 0x00FFFFFFu);                      // write alpha only
     volatile mc3_u32 *w = ad_begin(arena, 8u);
-    if (!w) return;
+    if (!w) return 0;
     ad_put(w, 0, flo, fhi, 0x4Cu + ctx);                     // FRAME
     ad_put(w, 1, word(GS_ZBUF_BASE), word(GS_ZBUF_BASE + 4u) | 1u, 0x4Eu + ctx);  // no Z write
     ad_put(w, 2, 0x30000u, 0u, 0x47u + ctx);                 // TEST: Z always, no alpha test
@@ -5176,6 +5220,32 @@ static void reflect_mask_pass(mc3_u32 arena) {
     ad_put(w, 5, 0u, 0u, 0x05u);                             // XYZ2 top left
     ad_put(w, 6, 0xFFFFFFFFu, 0u, 0x05u);                    // XYZ2 bottom right
     ad_put(w, 7, 0x5100Fu, 0u, 0x47u + ctx);                 // TEST as the city (GEQUAL)
+    return 1;
+}
+static void restore_frame_mask(mc3_u32 arena, mc3_u32 ctx) {
+    mc3_u32 flo, fhi;
+    frame_reg(&flo, &fhi, word(GS_FBMSK));                   // MC3's own mask again
+    volatile mc3_u32 *w = ad_begin(arena, 1u);
+    if (w) ad_put(w, 0, flo, fhi, 0x4Cu + ctx);
+}
+// A frame drawn WITHOUT the CPVS (it did not load: no room, missing file) has
+// no reflect_mask_pass, and the alpha the city left - 0x80 from whatever
+// palette sits in the VU - is read by MC3 as "glow here" (mcFbGlow,
+// m_useFbAlpha) and "mirror here" (CopyReflectedObjectsToFrame): the whole
+// screen went white (Tokyo MC2 after two San Diego fallbacks, 2026-10-05). So
+// the alpha is cleared all the same - no reflections on that ground, no glow.
+static void no_cpvs_alpha_pass(mc3_u32 arena) {
+    if (!reflect_mask_enabled()) return;
+    const mc3_u32 ctx = *(volatile mc3_u8 *)GS_CONTEXT;
+    if (clear_frame_alpha(arena, ctx)) restore_frame_mask(arena, ctx);
+}
+static void reflect_mask_pass(mc3_u32 arena) {
+    State *s = st();
+    if (!reflect_mask_enabled()) return;
+    const mc3_u32 ctx = *(volatile mc3_u8 *)GS_CONTEXT;
+    mc3_u32 flo, fhi;
+    volatile mc3_u32 *w;
+    if (!clear_frame_alpha(arena, ctx)) return;
     if (s->later_count) {
         queue_vcl(s->palette_refl);
         redraw_ground(arena);
@@ -5404,6 +5474,7 @@ static void draw_city() {
     queue_pins(arena);
     s->prof[3] += cycles_now() - pc; pc = cycles_now();
     if (split) reflect_mask_pass(arena);
+    else no_cpvs_alpha_pass(arena);
     s->prof[4] += cycles_now() - pc;
     if (zwrite_enabled()) queue_zbuf(arena, *(volatile mc3_u8 *)GS_ZWRITE_FLAG != 0u);
     ++s->queued;
@@ -5510,6 +5581,18 @@ static void restore_mc3_state() {
     if (*(volatile mc3_u8 *)RMC_LIGHTS_ON && word(RMC_LIGHTS))
         MC3_CALL1(void, RMC_UPDATE_LIGHTS, mc3_u32)(RMC_SCRATCH);
 }
+// The bootstrap's viewport (q8..9: 256,-224 against MC3's 1024,-896) and
+// camera (q0..7, q27) stay in VU1 for the native passes after the city, and
+// the headlight cone (mcSpotlight 0x1D86E8) used them. Re-sent through the
+// native setters: viewport DoFlush 0x5315B0 with bit 0 of +304 set,
+// SetCameraFinish 0x52E1C8 (the MCLA PSP fork's restore_psp_view, 2026-10-06).
+static void restore_native_view() {
+    const mc3_u32 viewport = word(PROJ_MATRIX_PTR);
+    if (!ptr(viewport)) return;
+    *(volatile mc3_u32 *)(viewport + 304u) |= 1u;
+    MC3_CALL1(void, 0x005315B0, mc3_u32)(viewport);
+    ((void (*)(void))0x0052E1C8)();
+}
 extern "C" void envmap_done_hook(mc3_u32 env) {
     MC3_CALL1(void, ENVMAP_DEBUG_DRAW, mc3_u32)(env);
     State *s = st();
@@ -5517,6 +5600,7 @@ extern "C" void envmap_done_hook(mc3_u32 env) {
     s->draw_pending = 0u;
     if (!s->defer_marked) { s->defer_marked = 1u; mark('R','D','E','F', 1u, s->queued); }
     draw_city();
+    restore_native_view();
     restore_mc3_state();
 }
 MC3_HOOK(ENVMAP_DEBUG_DRAW_CALL, envmap_done_hook);
@@ -5595,6 +5679,7 @@ static void set_camera_hook_body(mc3_u32 camera) {
         t->retry = 0u;
         s->texture_error = 0u;
     }
+    retry_cpvs();
     if (!load_step()) { /* still loading */ }
     if (s->props_ready && props_enabled()) {
         mc3_u32 c = cycles_now();
@@ -5617,6 +5702,8 @@ static void set_camera_hook_body(mc3_u32 camera) {
     if (defer_city_draw()) { s->draw_pending = 1u; return; }
     const mc3_u32 c = cycles_now();
     draw_city();
+    restore_native_view();
+    restore_mc3_state();
     s->cyc_draw += cycles_now() - c;
 }
 
@@ -5856,6 +5943,30 @@ extern "C" mc3_u32 start_race_hook(mc3_u32 game) {
     return MC3_CALL1(mc3_u32, START_RACE, mc3_u32)(game);
 }
 MC3_HOOK(START_RACE_CALL, start_race_hook);
+
+// Arcade Next Race queues event 6: EnterStateGame (jal 0x1A5620 -> 0x1A5700),
+// whose UpdateConfig 0x1A6798 creates a 1,126,400-byte LoadHeap at the top of
+// the main heap. With this renderer still resident, Los Angeles's Next Race
+// printed "not enough main heap memory for memtop heap" and ran on a null
+// heap (TLB 0x3AFE40). Everything of ours goes first, as on the way to the
+// front end; preload_city loads it again at StartRace. (The MCLA PSP fork
+// does the same for its slots, 2026-10-06.) Marker RNXR <city> <top free>.
+enum { ENTER_GAME_CALL = 0x001A5620, ENTER_GAME = 0x001A5700 };
+extern "C" mc3_u32 enter_game_hook(mc3_u32 game_state) {
+    const mc3_u32 cfg = word(RACE_CONFIG_CURRENT);
+    const mc3_u32 city = ptr(cfg) ? word(cfg) : 0xFFFFFFFFu;
+    if (mc2_city_supported(city)) {
+        typedef void (*release_fn)(void);
+        const release_fn mm = (release_fn)mc3_import(MC3_ID('M','M','R','L'));
+        if (mm) mm();
+        props_restore();
+        Tracked *t = trk();
+        if (t->active || st()) { release_all(); t->active = 0u; }
+        mark('R','N','X','R', city, mc3_heap_free(mc3_heap_active()));
+    }
+    return MC3_CALL1(mc3_u32, ENTER_GAME, mc3_u32)(game_state);
+}
+MC3_HOOK(ENTER_GAME_CALL, enter_game_hook);
 
 extern "C" void mod_main() __attribute__((section(".text.start")));
 extern "C" void mod_main() { }

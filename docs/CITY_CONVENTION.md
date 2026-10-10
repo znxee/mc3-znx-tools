@@ -5,7 +5,8 @@ others. Memory, the city table and the way back to the menu are **shared**. A
 city that does not follow the rules below does not only break itself: it breaks
 the **next** city the player picks.
 
-Every rule comes from a freeze measured on 2026-10-04.
+The rules come from freezes measured on 2026-10-04 and from the Next Race
+reload investigated on 2026-10-06 and 2026-10-09.
 
 Who follows it: every fork (Fork City MODS, MCLA PSP and any other). Whoever
 changes a rule records it in `FORKS.md`.
@@ -69,6 +70,47 @@ null heap.
   A cache that lasts the whole session is forbidden. That was the case of the
   minimap textures: 3 blocks of 64 KB stuck at the top after LA, Paris and
   Tokyo MC2.
+- **A direct reload must free the buffers before the native load too.** Next
+  Race goes straight to another race without visiting the frontend. In the
+  Remix, `0x358468` queues event 6, `0x1A5340` → `0x1A76C0` dispatches state 2
+  and JAL `0x1A5620` calls `EnterStateGame` (`0x1A5700`). Do not confuse event 6
+  with state 6 (`EnterStateRaceSelect`, JAL `0x1A5670`).
+  - `UpdateConfig` (`0x1A6798`) calls `0x1AAA38`, which creates a 1,126,400-byte
+    `LoadHeap` at the top. In LA PSP, resident buffers left only ~404 KB and the
+    load failed before reaching the StartRace hook.
+  - The hook at `0x1A5620`, in `city_original_maps`, covers the PSP slots 8
+    and 9 and, since 2026-10-09, the MC2 cities (5, 6, 7) too: it calls
+    `MMRL`, restores the props flag, frees the renderer/streams and emits
+    `RNXR <city> <room>`. The MC2 renderer is loaded again by `preload_city`
+    at StartRace, as after the frontend. Without it, Los Angeles's Next Race
+    printed "not enough main heap memory for memtop heap" and ran on a null
+    heap (TLB 0x3AFE40). The kit's `city_mc2_rsc_draw_test` has the same hook.
+    Since 2026-10-09 the PSP renderer is rebuilt before the loading ends,
+    following the cycle below. Compose handlers if another module needs the
+    same JAL.
+  - Other renderers must check their own life cycle before applying the same
+    release.
+- **PSP loading (slots 8/9, 2026-10-09):** `city_original_maps` also owns the
+  JALs `0x1AA184`, `0x1BE490`, `0x1AAD5C` and `0x1A585C`. The existing
+  `0x1A5620` hook starts the state from the destination NEXT config, outside
+  the release guard of the CURRENT config. The first two new JALs postpone
+  `0x1AAE28`, which writes the transition-out flag `thread+0x4004`. The draw
+  hook keeps the SWF and adds the status; the last one prepares the PSP data
+  before `StopLoading` (`0x1AAB08`). Compose handlers, never duplicate owners
+  of these JALs. Rebuild with the current `psp_loading.h`. `0x1A5728` still
+  belongs to `city_psp_race_rules` for forced vehicle selection; the renderer
+  does not replace it.
+  - While the LoadHeap is alive, prepare resident data and a `0xC0000` arena,
+    without sending any PSP drawing. After joining the thread and freeing the
+    LoadHeap, replace that arena with the adaptive double buffer, build the
+    EE/visibility caches and only then let the (already intercepted)
+    `StartRace` run. Keep no new font/atlas allocation in the heap: reuse an
+    existing font and release its reference after joining the thread.
+  - A failed load blocks `StartRace` and queues the native event 20 back to the
+    frontend. `PLRD` = data/simple arena ready; `PLDB` = double buffer/caches;
+    `PLST` precedes the race and `PLFR` the first draw. `pslg=0` turns off the
+    PSP gate and `pslt=0` only the text, in `[boot]`. Do not use these markers
+    to claim every event/weather was tested.
 - **Minimum room:** after the renderer is released, the top needs at least
   `0x180000` free (`FE_EMPTY_ROOM`).
   - Below that, the renderer takes the San Diego path (`RFEM`/`RFEN`) and
@@ -89,7 +131,16 @@ null heap.
 Executable tables with 4 entries (sd, atlanta, detroit, tokyo) that a new city
 has to avoid or intercept:
 
-- sirens (0x615740), already handled;
+- sirens (0x615740): only entries 0..3 exist; entry 4 holds code pointers and
+  entry 5 holds the float 0.5 where the name goes. Two readers:
+  - the bank, `0x209B98`, called at `0x1BDE24` and `0x1BDF30`;
+  - the sound constructor, `0x209AD0(sound, city)`, called at `0x2CFE18`
+    (`mcCarAudio::Init`) and `0x216820`. Its guard is `city >= 6`, so only LA
+    (5) got through: Los Angeles's Next Race stopped in `strcpy 0x432E58`
+    reading `0x3F000000` (fixed 2026-10-09).
+
+  Both live in `city_psp_slots` (Alpha 3.2 Remix) and `city_paris_slot7`
+  (kit): PSP and Tokyo MC2 use entry 3; the other cities from 4 up use 0;
 - HUD map data (0x6BDE20), through the minimap;
 - the menu camera movement (`MoveFECamera`, `slti 4`).
 
@@ -112,7 +163,44 @@ A new city reuses these interceptions instead of adding others.
   emitted table now has 29 entries. Do not fix this by skipping a null material
   in the consumer.
 
-## 5. Required test before publishing
+## 5. Frontend: flat menu, no city behind it
+
+Since 2026-10-05, leaving an added city for the frontend shows the menu **flat
+on the screen**, like the pause menu. The menu is no longer a panel standing in
+the world, and the city behind it is not drawn.
+
+- **How the game does it:** the frontend draws the menus and the Flash
+  backgrounds (`bg_*.swf`) into a 512×512 texture of `mcUIProjector`
+  (0x615708).
+  - `TakeDownScreen` (0x203FC8) pastes that texture on a quad with 4 corners in
+    the world.
+  - The corners come from `mc3FeView` per retail city (`sub_322260`, `city < 4`
+    only). An added city kept the constructor's default (690, 6..11,
+    479.7..487.9), and only a camera aimed there showed the menu.
+- **What `city_frontend_2d.mod` does** (`defer`, in the Alpha 3.2 Remix):
+  - before `TakeDownScreen` (jal 0x1A2E2C), it puts the 4 corners on a
+    rectangle in front of the camera that covers the screen;
+  - it uses the camera the game restores (0x6BE7E0) and the projection of the
+    saved viewport (0x6BE818);
+  - it does not draw the city (`mcPlayerManager::Draw`, jal 0x1A2AF4) and
+    clears the screen to black instead;
+  - it puts the original corners back after the draw.
+- **Rule:** a new city does **not** create its own camera or menu panel in the
+  world. It uses this module, which applies to any city index ≥ 4.
+  - The renderers' `fe_transition` (built-in camera) stays only for `fe2d = 0`
+    and for the LAN lobby with `lank = 1`.
+  - On the San Diego path (`RFEM`, `fesd = 1`), the city behind the menu is San
+    Diego, retail, and the normal 3D frontend stays.
+- **The empty city is not reloaded:** on the normal path (`RFEE`) both configs
+  stay equal, `EnterStateMC3Frontend` loads nothing and the race's city only
+  stays in memory, undrawn.
+  - Running the frontend with **no** city at all is not supported by the game:
+    it reloads layer 0 whenever it is missing, and `nocity` has no files.
+- **`[boot]` keys:** `fe2d = 0` brings back the panel in the world; `fe2w = 1`
+  keeps the flat menu but draws the city behind it.
+- **Marker:** `RF2D <city> <near × 1000>`, once per frontend visit.
+
+## 6. Required test before publishing
 
 1. `python mc3_city_check.py "$MC3_HOSTFS"`, with status 0.
 2. **Ordered Race cycle** through every Arcade city, going out to the frontend
@@ -130,8 +218,34 @@ A new city reuses these interceptions instead of adding others.
        "press cross" "until row:players 180"
    ```
 
-   Needs `menu_state.mod` (`defer`) enabled in the install.
+   Needs `menu_state.mod` (`defer`) enabled in the install. PINE takes ONE
+   client: a PCSX2 the user left open holds port 28011, and the driver then
+   uses 28012 by itself; a script that forces `--pine-port 28011` fails to
+   bind ("PINE: Error while binding to socket").
 3. **In the PCSX2 log:** no `TLB Miss` and no "not enough main heap memory". On
    a real PS2 a TLB miss freezes the console even when PCSX2 keeps going.
 4. **Forced exit through the San Diego path:** with `--boot fesd=1` the new
-   city must come back to the Arcade (this tests rule 2).
+   city must come back to the Arcade (this tests rule 2). The forced test must
+   also run **Next Race on every visit to every city of the route**, before Go
+   to Menus, repeat visits included. `city_cycle_next.py --fesd` requires at
+   least one advance per visit and ignores the `--psp-only-next` filter. Record
+   the previous/next race name, same city, game in state 2 and the LoadHeap
+   given back (zero); a missing advance or one without a race change fails the
+   gate. Baseline failures stay recorded failures; they never skip this step
+   silently.
+5. **Flat menu:** on the way back from each new city through the normal path,
+   the log has `RF2D <city>`, and a `shot` after `until row:players` shows the
+   menu covering the screen over black (section 5).
+6. **Next Race in the cities whose load was added or changed:** before Go to
+   Menus, open the pause menu, select Next Race and wait for the next race:
+
+   ```
+   "push start state:2" "select next_race" "press cross" \
+       "until state:1 180" "menu" "wait 20"
+   ```
+
+   Check the new race name at `*0x619B10 + 104` (`peek 0x619B10 104 108 ...`
+   in the driver), city/time, game in state 2, `*0x6144C0 == 0` after the load
+   and a clean log. Repeat with a change of time and then of city. The results
+   button uses the same callback in the Remix; static equivalence does not
+   claim coverage of every race/mode.

@@ -97,7 +97,7 @@ def managed(name):
     base = name.split(';')[0]
     return (base.endswith('.MOD') or base in {
         'BANKS.DAT', 'ASSETS.DAT', 'MC3BOOT.ELF', 'MC3BOOT.INI',
-        'MC3MOD.BIN', 'LEIAME.TXT', 'README.TXT', 'SLUS_213.55M', 'MC2.DAT'
+        'MC3MOD.BIN', 'LEIAME.TXT', 'README.TXT', 'SLUS_213.55M', 'MC2.DAT', 'MCLA.DAT'
     })
 
 

@@ -253,3 +253,20 @@ MC3_HOOK(0x001A0F40, mc3_city_paris_slot7);
 MC3_HOOK(0x001A12E0, mc3_city_paris_slot7_after_load);
 MC3_HOOK(0x001BDE24, mc3_city_siren_bank);
 MC3_HOOK(0x001BDF30, mc3_city_siren_bank);
+
+// The siren SOUND constructor 0x209AD0(sound, city) indexes the same table on
+// its own, `city >= 6 ? entry 0 : entry 5 * city` - a guard for the six city
+// records, not for the four entries. Los Angeles (5), the one added city
+// below 6, took entry 5: the float 0.5 where the name goes, and strcpy
+// 0x432E58 read 0x3F000000 (Next Race; callers mcCarAudio::Init 0x2CFE18 and
+// 0x216820, 2026-10-09). Same mapping as the bank above.
+extern "C" mc3_u32 mc3_city_siren_sound(mc3_u32 sound, mc3_u32 city)
+{
+    if (city == (mc3_u32)CITY_TOKYO_MC2)
+        city = (mc3_u32)SIREN_TOKYO;
+    else if (city >= (mc3_u32)SIREN_CITIES)
+        city = 0u;
+    return MC3_CALL2(mc3_u32, 0x00209AD0, mc3_u32, mc3_u32)(sound, city);
+}
+MC3_HOOK(0x00216820, mc3_city_siren_sound);
+MC3_HOOK(0x002CFE18, mc3_city_siren_sound);

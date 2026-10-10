@@ -69,8 +69,15 @@ the finding behind the tool, and `python TOOL.py --help` lists its options.
 - Menu-driven tests: `tools/mc3_pcsx2_drive.py` plays a script of steps;
   with the `menu_state` module loaded (`defer`) its `until`/`select`/`push`
   steps read the menu through PINE (`tools/mc3_menu_state.py`) instead of
-  counting presses. `tools/mc3_city_check.py` checks an install's city
-  shells against `docs/CITY_CONVENTION.md`.
+  counting presses; `peek` prints words of RAM over the same connection (PINE
+  takes one client at a time). `tools/mc3_city_check.py` checks an install's
+  city shells against `docs/CITY_CONVENTION.md`.
+- `mods/city_frontend_2d`: the frontend of an added city drawn flat on the
+  screen, like the pause menu, instead of as a panel standing in the city
+  (section 5 of the convention).
+- `tools/mc3_gsdump.py` and `tools/mc3_gsdump_fog.py` read a PCSX2 GS dump
+  (Shift+F8): what reached the GS per draw group, and the fog factor of every
+  textured draw (a draw with fog on and F = 0 comes out as the fog colour).
 - `audio/mc3_music_core.py` also needs Edness's `MclHash.py` and `strtbl.py`
   on the Python path; they are not redistributed here.
 - Before trying a change on a real PS2, `tools/mc3_pcsx2_accurate.py on` puts
