@@ -1,0 +1,41 @@
+# Changelog v0.6
+
+## Fixes
+
+- [psp map] Fixed gray and transparent traffic vehicles.
+- [psp map] Fixed the misplaced headlight cone and its incorrect response to camera movement.
+- [psp map] Fixed minimap alignment in Los Angeles and Tokyo.
+- [psp map] Fixed transparency on trees, bushes and decals.
+- [psp map] Fixed incorrect depth writes from Tokyo light cards that could hide parts of vehicles.
+- [psp map] Fixed cars, traffic and pedestrians disappearing because of occlusion volumes inherited from another city.
+- [psp map] Fixed pedestrians being covered by the map rendering pass.
+- [psp map] Fixed resource cleanup during city changes and Next Race, preventing related freezes.
+- [psp map] Corrected collision material mappings and oversized collisions on Los Angeles pillars.
+- [psp map] Restored missing glass textures and proper shattering; broken panels no longer retain collision.
+- [psp map] Adjusted traffic height on mapped routes and fixed height-profile loading in disc builds.
+- [psp map] Fixed traffic and pedestrian density selection being lost on race reloads.
+- [psp map] Disabled vehicle headlights and headlight cones during daytime.
+- [psp map] Separated race modes in Arcade and kept Next Race within the selected mode.
+- [psp map] Fixed race selection with large event catalogs.
+- [psp map] Restored missing per-instance colors on maps and props.
+- [psp map] Fixed missing mipmapping on supported map textures.
+- [psp map] Reduced EE processing overhead and restored the previous PSP draw-distance limits.
+- [psp map] Fixed loading-screen timing so gameplay waits for map preparation, with English progress text.
+- [psp map] Replaced !!content!! placeholders with proper city names: Los Angeles - LA Remix and Tokyo - LA Remix.
+- [psp map] Fixed PSP map loading memory reservation.
+- [mc2 map] Fixed the loading screen ending before Los Angeles, Paris and Tokyo (MC2) were loaded; it now shows progress text.
+- [mc2 map] Fixed the freeze on Next Race in Los Angeles (MC2).
+- [mc2 map] Fixed the white overexposure on Tokyo (MC2) buildings and streets.
+- [mc2 map] Added cities now show their front-end menu flat on screen, like the pause menu, when memory allows.
+- [mc2 map] Restored vertex colors on Tokyo roads and sidewalks that were dropped by a list limit.
+- [mc2 map] Restored vertex colors on walls and buildings that only have a distant model (hundreds of walls in Los Angeles).
+- [mc2 map] Lit windows now glow from inside the buildings instead of covering the facades with a blurred texture.
+- [mc2 map] Fixed see-through glass (the Louvre pyramid, shop windows) hiding what is behind it and showing the sky.
+- [mc2 map] Fixed the large trees of Paris and the trees of the Champs-Elysees drawing white, plus a Paris tunnel wall and two Tokyo signs.
+- [mc2 map] Restored the missing shop windows and glass doors; they shatter on impact and leave no collision.
+- [mc2 map] Removed the invisible wall under the Tokyo railway arms; pillars now collide only at their feet, and pillars that had no collision now do.
+- [mc2 map] Opponents steer around road pillars instead of getting stuck on them.
+- [mc2 map] Converted MC2 races use MC3's opponent tuning (throttle and rubber band), so opponents are no longer slower than normal.
+- [mc2 map] Partially fixed the white patch at the top of the sky seen with the nitro field of view.
+- [general] Removed an unused VU1 setting that made PCSX2's multi-threaded VU wait on every program.
+- [loader] The [boot] section of mc3boot.ini is no longer limited to 16 keys.

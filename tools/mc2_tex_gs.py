@@ -52,7 +52,8 @@ def addr32(wx, wy, dbw):
     return page * 2048 + blk * 64 + columnTable32[wy & 7][wx & 7]
 
 
-_RECT4 = {1: (1, 1), 2: (2, 1), 4: (2, 2), 8: (4, 2), 16: (4, 4), 32: (8, 4)}
+_RECT4 = {1: (1, 1), 2: (2, 1), 4: (2, 2), 8: (4, 2), 16: (4, 4), 32: (8, 4),
+          64: (8, 8), 128: (16, 8)}   # more than one PSMT4 page: Paris tree01, tunnel02, Tokyo sign60/61
 
 
 def decode(stream, w, h, bpp):

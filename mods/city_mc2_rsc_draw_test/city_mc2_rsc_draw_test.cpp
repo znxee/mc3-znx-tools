@@ -79,7 +79,7 @@ enum {
     MODEL_HASH = 2048,
     INST_HASH = 16384,
     MAX_HOODS = 32,
-    MAX_COMP_PCP = 512,
+    MAX_COMP_PCP = 1024,        // component `_0_main` + `_0_refl` chains: LA 438, Paris 386, Tokyo 629
     HOOD_CHUNK = 32768,         // was 4096: from the disc every read is one CDVD command
     HOOD_CHUNKS_PER_FRAME = 16,
     STREAM_SEEK = 0x003996C0,
@@ -97,9 +97,10 @@ enum {
     VIF_UNPACK_MATRIX = 0x6C04000Cu,  // UNPACK V4-32 x4 -> VU 12
     VIF_UNPACK_VIEWPROJ = 0x6C040004u // UNPACK V4-32 x4 -> VU 4 (view-projection)
 };
-enum { MAX_TOUR_POINTS = 256, MAX_PINS = 128 };
-enum { REF_RESOLVED = 0x01000000u };   // queue_pcp: this CPVS REF's address is final
-enum { FX_RULE_COUNT = 17, MAX_SPOUTS = 8, MAX_FX_AMBIENT = 128, MAX_SKY_LAYERS = 8 };
+enum { MAX_TOUR_POINTS = 256, MAX_PINS = 128, MAX_GLASS = 512 };
+enum { REF_RESOLVED = 0x01000000u };
+enum { SOFT_ALPHA = 0x60u, SOFT_TEST = 0x5160Bu, CITY_TEST = 0x5100Fu };   // soft_texels   // queue_pcp: this CPVS REF's address is final
+enum { FX_RULE_COUNT = 18, MAX_SPOUTS = 8, MAX_FX_AMBIENT = 128, MAX_SKY_LAYERS = 8 };
 
 struct Target {
     mc3_u32 pmd;
@@ -115,6 +116,7 @@ struct Target {
 struct Piece {
     mc3_u32 ready, block, block_bytes, error, calls, anchor_reported;
     mc3_u32 seg_count, segs;
+    mc3_u32 lit;        // every MSCAL is 4: MC2's lit-window layer (draw_lit_first)
     mc3_u32 packet;     // static pieces: matrix VCLQ (identity / preview offset)
 };
 struct Level {
@@ -127,6 +129,7 @@ struct Slot {                    // one MC2 image (TEX0s sharing MIP0+PAL0)
     mc3_u8 bpp, tw, th, levels;
     mc3_u16 blocks, clut_blocks;
     mc3_u32 tcc;                // 0: CLUT alpha all zero -> colour only
+    mc3_u32 soft;               // see SOFT_TEST: translucent texels, no Z there
     Level level[MAX_LEVELS];
 };
 struct Hood {                    // line reader for .lvl / .hood text
@@ -160,6 +163,7 @@ struct PropType {
     mc3_u8 fx[4], fx_count, fx_always;
     // the PRP0's compiled lights (MC2 light_data): count and first record
     mc3_u32 light_n, light_rec, light_data;
+    mc3_u32 glass;       // a breakglass/breakdoor pane (glass_update)
 };
 // One layer of MC2's sky (sky_N MOD0 of <time>_<weather>.rsc)
 struct SkyLayer {
@@ -191,6 +195,9 @@ struct AnimProp {
 struct ModelDraw {
     mc3_u32 flags, count, pieces[MAX_MODEL_PMDS];
 };
+// ModelDraw.flags: the model has no near LOD and is drawn from slots 2/3 -
+// its CPVS chains are `_1_main` / `_1_refl` (build_cpvs_names)
+enum { MODEL_INSTANCED = 1u, MODEL_FAR_ONLY = 2u };   // 1: a .hood instance type (hood reader)
 // A mark the player put in the world (pins_update): category 1 texture,
 // 2 collision, 3 other; wall = on the wall ahead instead of the ground.
 struct Pin {
@@ -271,6 +278,10 @@ struct State {
     mc3_u32 frame_uploads, frame_upload_bytes, frame_wraps, frame_dropped;
     mc3_u32 frame_pcp, frame_pmd, frame_pcp_failed, bound_switch, pcp_limit;
     mc3_u32 frame_skipped, all_white;
+    mc3_u32 additive_tex[MAX_RSC_ENTRIES / 32], bound_additive, additive_on, lit_first_on;
+    mc3_u32 glass_broken[MAX_PROPS / 32], glass_count, glass_breaks;   // glass_update
+    mc3_u16 glass_list[MAX_GLASS];
+    mc3_u32 last_image, bound_test, soft_on, mat_live;   // use_image / set_test   // see bind_texture
     float draw_radius;
     mc3_u32 cpvs_state, cpvs_stream, cpvs_mem, cpvs, cpvs_bytes;
     mc3_u32 cpvs_count, cpvs_error, cpvs_reported, palette;
@@ -867,6 +878,7 @@ static int open_rsc_stream() {
     s->rsc_table = table;
     s->rsc_scratch_mem = (mc3_u32)scratch_mem;
     s->rsc_scratch = scratch;
+    for (mc3_u32 i = 0; i < MAX_RSC_ENTRIES / 32u; ++i) s->additive_tex[i] = 0u;
     s->rsc_state = 1;
     mark('R','S','C','S', count, s->rsc_size);
     if (!plan_rsc_textures()) {
@@ -909,7 +921,7 @@ static int build_packet(Piece *piece, const Target *target) {
         consumed = size;
         mc3_u32 seg_start[MAX_SEGMENTS], seg_qwc[MAX_SEGMENTS];
         mc3_u32 seg_img[MAX_SEGMENTS];        // CALL handle selected after it
-        mc3_u32 nseg = 0, start = 0, bound = 0xFFFFFFFFu, p = 0;
+        mc3_u32 nseg = 0, start = 0, bound = 0xFFFFFFFFu, p = 0, mscal4 = 0, mscal_other = 0;
         while (p < size) {
             if (size - p < 16u) { fail(piece, 9); goto done; }
             mc3_u32 *tag = (mc3_u32 *)(base + p);
@@ -921,6 +933,17 @@ static int build_packet(Piece *piece, const Target *target) {
             // its IMMEDIATE field, which a NOP ignores: resolve_ref needs it to
             // tell which of up to three PMDs a CPVS ref really points into.
             tag[0] = lo & 0xFFFFu; tag[1] = 0;
+            // MSCAL 4 in the tag's VIF codes: MC2's lit-window pass, drawn
+            // with the texture of the last CALL before it (see bind_texture)
+            for (int v = 2; v < 4; ++v) {
+                if ((tag[v] & 0x7F000000u) != 0x14000000u) continue;
+                if ((tag[v] & 0xFFFFu) != 4u) { ++mscal_other; continue; }
+                ++mscal4;
+                if ((bound & 0x4000u) && (bound & 0x3FFFu) && (bound & 0x3FFFu) - 1u < (mc3_u32)MAX_RSC_ENTRIES) {
+                    const mc3_u32 index = (bound & 0x3FFFu) - 1u;
+                    s->additive_tex[index >> 5] |= 1u << (index & 31u);
+                }
+            }
             if (id == 5u) {
                 // MC2's CALL into a texture chain: its payload goes first, then
                 // the texture. Cut here unless it is already the bound one.
@@ -974,6 +997,7 @@ static int build_packet(Piece *piece, const Target *target) {
         piece->seg_count = nseg;
         piece->segs = compact + size;
         piece->calls = ncall;
+        piece->lit = mscal4 && !mscal_other;
         piece->ready = 1;
         s->rsc_cursor = off + consumed;
     }
@@ -1105,6 +1129,7 @@ static void queue_zbuf(mc3_u32 arena, int write) {
 
 static mc3_u32 use_image(mc3_u32 image, mc3_u32 arena) {
     State *s = st();
+    s->last_image = image;                 // for bind_switch's TEST (soft)
     if (image_resident(image)) return s->image_switch[image];
     const Slot *t = &s->slots[image];
     if (!arena_can_take(upload_bytes(image))) { ++s->frame_dropped; return 0; }
@@ -1164,18 +1189,68 @@ static mc3_u32 texture_slot(mc3_u32 handle);
 // nothing (measured: ~2000 of them per frame, 30 -> 17 FPS).
 static volatile mc3_u32 *ad_begin(mc3_u32 arena, mc3_u32 n);
 static void ad_put(volatile mc3_u32 *w, mc3_u32 k, mc3_u32 lo, mc3_u32 hi, mc3_u32 reg);
-static void bind_switch(mc3_u32 sw) {
+// MC2's lit windows (Fork City, 2026-10-10): the batches a PMD0 kicks with
+// MSCAL 4 - and only those - use the night-window textures: lit windows on
+// black, alpha 0x80 everywhere (LA l_shared_win38/39*, Paris p_shared_win015/
+// 016*, Tokyo t_shared_fx_floursnt/stoabs/floursnt02/incandescent02 and
+// window37b; never with MSCAL 8 in any of the three cities). Such a PMD0 holds
+// nothing else, and it is always the SECOND piece of the model whose first
+// piece is the facade, on the facade's plane. The facade's window textures are
+// partly translucent (t_ginza_window_01a/02a/03a, window37a/49: alpha 41-87 on
+// 9-87% of texels): the lit layer is the light INSIDE, seen through the glass.
+// So it is drawn before its facade (Piece.lit, draw_lit_first), opaque, with
+// the city's ALPHA 0x44 - drawn after it, the black covered every facade with
+// the same blurred window texture (the player's wall pins in Tokyo and Paris).
+// [boot] mc2j = 1 instead ADDS the layer (ALPHA_1 0x48, Cs * As + Cd) - the
+// first attempt, kept for comparison.
+static int additive_enabled() {          // read once per frame (additive_on)
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','j'));
+    return v && v[0] == '1';
+}
+static int handle_additive(mc3_u32 handle) {
+    const State *s = st();
+    if (!(handle & 0x4000u) || !(handle & 0x3FFFu)) return 0;
+    const mc3_u32 index = (handle & 0x3FFFu) - 1u;
+    return index < (mc3_u32)MAX_RSC_ENTRIES && ((s->additive_tex[index >> 5] >> (index & 31u)) & 1u);
+}
+static void set_blend(int additive) {
     State *s = st();
-    if (sw == s->bound_switch) return;
-    s->bound_switch = sw;
-    queue_ref(sw, 7u, 0u, 0u);
-    if (s->force_tcc) {
-        // the same TEX0 with TCC=1 (and no CLUT reload): the texture's own
-        // alpha - the wetness of MC2's ground textures - reaches the frame
-        const volatile mc3_u32 *w = (const volatile mc3_u32 *)(sw | UNCACHED);
-        volatile mc3_u32 *a = ad_begin(s->arena[s->queued & 1u], 1u);
-        if (a) ad_put(a, 0, w[8], (w[9] | 4u) & ~(7u << 29), 0x06u);
+    if ((mc3_u32)additive == s->bound_additive) return;
+    volatile mc3_u32 *a = ad_begin(s->arena[s->queued & 1u], 1u);
+    if (!a) return;
+    ad_put(a, 0, additive ? 0x48u : 0x44u, 0u, 0x42u);
+    s->bound_additive = (mc3_u32)additive;
+}
+static void set_test(int soft) {
+    State *s = st();
+    if ((mc3_u32)soft == s->bound_test) return;
+    volatile mc3_u32 *a = ad_begin(s->arena[s->queued & 1u], 1u);
+    if (!a) return;
+    ad_put(a, 0, soft ? (mc3_u32)SOFT_TEST : (mc3_u32)CITY_TEST, 0u, 0x47u);
+    s->bound_test = (mc3_u32)soft;
+}
+static void bind_switch(mc3_u32 sw, int additive = 0) {
+    State *s = st();
+    // material state only inside the city's own passes (mat_live): the sky,
+    // the reflection mask and the wet pass set TEST themselves
+    if (s->mat_live) set_test(s->soft_on && s->last_image < s->slot_count && s->slots[s->last_image].soft);
+    if (sw != s->bound_switch) {
+        s->bound_switch = sw;
+        queue_ref(sw, 7u, 0u, 0u);
+        if (s->force_tcc) {
+            // the same TEX0 with TCC=1 (and no CLUT reload): the texture's own
+            // alpha - the wetness of MC2's ground textures - reaches the frame
+            const volatile mc3_u32 *w = (const volatile mc3_u32 *)(sw | UNCACHED);
+            volatile mc3_u32 *a = ad_begin(s->arena[s->queued & 1u], 1u);
+            if (a) ad_put(a, 0, w[8], (w[9] | 4u) & ~(7u << 29), 0x06u);
+        }
     }
+    if (s->mat_live) set_blend(additive);
+}
+// A texture of an MC2 chain (PMD0 / PCP0 CALL), by its handle.
+static void bind_texture(mc3_u32 sw, mc3_u32 handle) {
+    const State *s = st();
+    bind_switch(sw, !s->force_tcc && s->additive_on && handle_additive(handle));
 }
 
 // Queue a piece's PMD0 as MC2 would run it: each segment, then the texture
@@ -1198,7 +1273,7 @@ static int queue_piece(const Piece *piece, mc3_u32 arena) {
         const mc3_u32 image = texture_slot(seg[k * 3u + 2u]);
         if (image == NO_IMAGE) continue;
         const mc3_u32 sw = use_image(image, arena);
-        if (sw) bind_switch(sw);
+        if (sw) bind_texture(sw, seg[k * 3u + 2u]);
     }
     ++s->frame_pmd;
     return 1;
@@ -1307,6 +1382,35 @@ static mc3_u32 tex_entry(mc3_u32 container, mc3_u32 handle, mc3_u32 fourcc) {
     return s->shared + word(s->shared + 8u + index * 8u);
 }
 
+// Translucent texels (Fork City, 2026-10-10). With TEST_1 0x5100F (alpha test
+// NOTEQUAL 0, FB_ONLY on fail, Z GEQUAL) every texel but alpha 0 wrote depth -
+// glass too: Paris's Louvre pyramid (p_rb_opera_bastille03, 76% of texels at
+// alpha 0x10-0x1F) hid the hall and the courtyard drawn after it and the sky
+// showed through the glass; the same for shop windows (l_shared_win43, 0x40-
+// 0x5F) and leaf edges. A texture of the city / ambients bank (TCC=1) with at
+// least 4% of texels at 1..0x5F is `soft`: bound, TEST_1 becomes alpha test
+// GEQUAL 0x60 with FB_ONLY - colour blended as before, depth only from the
+// solid texels (leaves 0x60-0x7F still occlude). Counted on level 0, every
+// 4th byte. [boot] soft = 0 keeps 0x5100F for all.
+
+static mc3_u32 soft_texels(const Slot *t) {
+    mc3_u8 cls[256];
+    const mc3_u32 n = t->bpp == 8u ? 256u : 16u;
+    for (mc3_u32 i = 0; i < n; ++i) {
+        const mc3_u32 at = t->bpp == 8u ? ((i & 0xE7u) | ((i & 0x10u) >> 1) | ((i & 0x08u) << 1)) : i;
+        const mc3_u32 a = word(t->pal + 16u + at * 4u) >> 24;
+        cls[i] = (mc3_u8)(a && a < SOFT_ALPHA);
+    }
+    const mc3_u8 *px = (const mc3_u8 *)t->level[0].addr;
+    const mc3_u32 bytes = (mc3_u32)t->level[0].qwc * 16u;
+    mc3_u32 soft = 0, total = 0;
+    for (mc3_u32 i = 0; i < bytes; i += 4u) {
+        const mc3_u32 b = px[i];
+        if (t->bpp == 8u) { soft += cls[b]; ++total; }
+        else { soft += cls[b & 15u] + cls[b >> 4]; total += 2u; }
+    }
+    return total && soft * 25u >= total;
+}
 // Build one slot from a TEX0 (in `container`). Returns the slot or NO_IMAGE.
 static mc3_u32 make_slot(mc3_u32 container, mc3_u32 tex) {
     State *s = st();
@@ -1343,17 +1447,37 @@ static mc3_u32 make_slot(mc3_u32 container, mc3_u32 tex) {
         mc3_u32 rw, rh, dbw = 1u, dpsm = 0u, blocks;
         if (t->bpp == 8u) {
             rw = wk / 2u; rh = hk / 2u;
+            // Below 16x16 texels the image is still one whole PSMT8 block
+            // (256 bytes, 8x8 words) and MC2 stores all of it: a 4x4-word
+            // rectangle put only half of an 8x8 texture's texels in place
+            // and the GS read the rest from whatever the VRAM ring held -
+            // the sky caps (*_sky_*_cap, 8x8) drew white at the top of the
+            // sky in all three cities, seen with the wider nitro FOV
+            // (player's savestate, 2026-10-10).
             if (!rw || !rh) break;
+            if (rw < 8u) rw = 8u;
+            if (rh < 8u) rh = 8u;
             dbw = (rw + 63u) / 64u;
-            blocks = (wk * hk + 255u) / 256u;
+            blocks = rw * rh / 64u;
         } else if (k == 0u && wk == 16u && hk == 16u) {
             rw = 16u; rh = 16u; dpsm = 0x14u;          // 128 packed bytes, PSMT4
             blocks = 1u;
         } else {
             mc3_u32 across, down;
             blocks = wk * hk / 512u;
-            if (!rect4(blocks, &across, &down)) break;
-            rw = across * 8u; rh = down * 8u;
+            if (blocks == 64u || blocks == 128u) {
+                // More than one PSMT4 page (Paris p_props_tree01 256x256 = 128
+                // blocks, p_roads_tunnel02 and Tokyo t_shared_sign60/61 256x128
+                // = 64 - refused before: the big trees drew with the white
+                // texture). rect4's rule goes on - width doubles, then height:
+                // 64 -> 8x8 blocks (64x64 words, DBW 1), 128 -> 16x8 (128x64,
+                // DBW 2). Either way the pages land in order, as PSMT4 with
+                // TBW 4 reads them (both sizes checked by decoding on PC).
+                rw = blocks == 128u ? 128u : 64u; rh = 64u; dbw = rw / 64u;
+            } else {
+                if (!rect4(blocks, &across, &down)) break;
+                rw = across * 8u; rh = down * 8u;
+            }
         }
         const mc3_u32 bytes = dpsm ? rw * rh / 2u : rw * rh * 4u;
         if (!off || (off & 15u) || (bytes & 15u) || bytes > have * 256u + 128u) break;
@@ -1387,6 +1511,7 @@ static mc3_u32 make_slot(mc3_u32 container, mc3_u32 tex) {
         if (a > top_alpha) top_alpha = a;
     }
     t->tcc = container == 1u ? 0u : top_alpha != 0u;
+    t->soft = t->tcc ? soft_texels(t) : 0u;
     return s->slot_count++;
 }
 
@@ -1417,7 +1542,7 @@ static int make_white() {
     Level *l = &t->level[0];
     l->addr = base; l->qwc = 16u; l->rw = 8u; l->rh = 8u; l->dbw = 1u;
     l->dpsm = 0u; l->tbw = 1u; l->blocks = 1u;
-    t->clut_blocks = 4u; t->blocks = 5u; t->tcc = 1u;
+    t->clut_blocks = 4u; t->blocks = 5u; t->tcc = 1u; t->soft = 0u;
     s->white_slot = s->slot_count++;
     return 1;
 }
@@ -1743,8 +1868,23 @@ static __attribute__((noinline)) int stream_seek(mc3_u32 h, mc3_u32 pos) {
 }
 
 // Whole small file into the heap (16-aligned, NUL after the end).
+static mc3_u32 read_whole_h(mc3_u32 h, mc3_u32 max, mc3_u32 *bytes, mc3_u32 *mem);
 static mc3_u32 read_whole(const char *path, mc3_u32 max, mc3_u32 *bytes, mc3_u32 *mem) {
-    const mc3_u32 h = stream_open(path);
+    return read_whole_h(stream_open(path), max, bytes, mem);
+}
+// An MC3 asset (datAssetManager::Open(name, ext, 0, 1, 0x620000), the call
+// LoadBuild makes): "$/resources/city/<x>" + ext is found wherever the game
+// finds its own files - ASSETS/ on HostFS, ASSETS.DAT from disc.
+enum { ASSET_MANAGER_PTR = 0x006D557C };
+static mc3_u32 open_asset(const char *name, const char *ext) {
+    const mc3_u32 mgr = word(ASSET_MANAGER_PTR);
+    if (!ptr(mgr) || !ptr(word(mgr))) return 0u;
+    const mc3_u32 open = word(word(mgr) + 36u);
+    return MC3_CALL6(mc3_u32, open, mc3_u32, const char *, mc3_u32, int, int, int)
+        (mgr, name, (mc3_u32)ext, 0, 1, 0x620000);
+}
+static mc3_u32 read_whole_h(mc3_u32 h, mc3_u32 max, mc3_u32 *bytes, mc3_u32 *mem) {
+    *bytes = 0u; *mem = 0u;
     if (!h) return 0u;
     const int size = stream_size(h);
     mc3_u8 *m = size > 0 && (mc3_u32)size <= max && heap_room((mc3_u32)size + 32u)
@@ -1802,7 +1942,7 @@ static int build_catalog() {
         md->flags = 0u; md->count = 0u;
         // near LOD = slots 0 and 1; a model without one falls back to 2 and 3
         mc3_u32 first = 4u;
-        if (!w[4] && !w[5] && !w[6] && !w[7]) first = 8u;
+        if (!w[4] && !w[5] && !w[6] && !w[7]) { first = 8u; md->flags |= MODEL_FAR_ONLY; }
         for (mc3_u32 k = first; k < first + 4u; ++k) {
             const mc3_u32 hnd = w[k];
             if (!hnd) continue;
@@ -1914,7 +2054,7 @@ static void hood_line(const char *p) {
             mat[row * 4 + 3] = row == 3 ? 0x3F800000u : 0u;
         }
         s->inst_ext[i] = (mc3_u16)hd->ext;
-        s->models[hd->model].flags = 1u;
+        s->models[hd->model].flags |= MODEL_INSTANCED;
         return;
     }
     if (starts(p, kw_type())) {
@@ -2055,7 +2195,7 @@ static void step_hoods() {
         r_free((void *)hd->buf_mem);
         hd->buf_mem = 0;
         for (mc3_u32 i = 0; i < s->target_count; ++i)
-            s->targets[i].flags = s->models[s->targets[i].model_id].flags;
+            s->targets[i].flags = s->models[s->targets[i].model_id].flags & MODEL_INSTANCED;
         // (model, extension) -> instance, for the CPVS names
         for (mc3_u32 i = 0; i < INST_HASH; ++i) s->inst_hash[i] = 0xFFFFu;
         for (mc3_u32 i = 0; i < s->instance_count; ++i) {
@@ -2101,6 +2241,10 @@ static int refl_tables() {
     s->later = s->inst_refl + MAX_INSTANCES;
     return 1;
 }
+static int far_component(const char *nm, mc3_u32 core) {
+    const mc3_u32 model = find_model(nm, core);
+    return model != NO_IMAGE && (st()->models[model].flags & MODEL_FAR_ONLY) != 0u;
+}
 static int build_cpvs_names() {
     State *s = st();
     char path[96];
@@ -2131,9 +2275,14 @@ static int build_cpvs_names() {
         const char *nm = (const char *)(rnt + word(rec));
         mc3_u32 len = 0;
         while (nm[len]) ++len;
-        // "..._0_main" (pass 0) or "..._0_refl" (pass 1)
-        if (len < 8u || nm[len - 7u] != '_' || nm[len - 6u] != '0' || nm[len - 5u] != '_')
+        // "..._0_main" (pass 0) or "..._0_refl" (pass 1); "_1_" for a model
+        // that has only its far LOD (Fork City, 2026-10-10: LA's
+        // industrial_wall_05x, freeway_wall_01x, WhereHouse_Type03_x,
+        // generic_officemedium_04x... - 700+ walls drawn flat, the player's pins)
+        if (len < 8u || nm[len - 7u] != '_' || (nm[len - 6u] != '0' && nm[len - 6u] != '1') ||
+            nm[len - 5u] != '_')
             continue;
+        const int far_lod = nm[len - 6u] == '1';
         const mc3_u8 c0 = lower((mc3_u8)nm[len - 4u]), c1 = lower((mc3_u8)nm[len - 3u]),
                      c2 = lower((mc3_u8)nm[len - 2u]), c3 = lower((mc3_u8)nm[len - 1u]);
         const int is_main = c0 == 'm' && c1 == 'a' && c2 == 'i' && c3 == 'n';
@@ -2156,12 +2305,15 @@ static int build_cpvs_names() {
             for (mc3_u32 i = d; i < core; ++i) ext = ext * 10u + (mc3_u32)(nm[i] - '0');
             const mc3_u32 model = find_model(nm + inst_at, d - inst_at);
             if (model == NO_IMAGE) continue;
+            if (far_lod != ((s->models[model].flags & MODEL_FAR_ONLY) != 0u)) continue;
             const mc3_u32 inst = find_instance(model, ext);
             if (inst == NO_IMAGE) continue;
             if (pass == 0u) { s->instance_word[inst] = index + 1u; ++inst_hits; }
             else { s->inst_refl[inst] = (mc3_u16)(index + 1u); ++refl_hits; }
             s->cpvs_need[index >> 5] |= 1u << (index & 31u);
             if (pass == 1u) s->refl_chain[index >> 5] |= 1u << (index & 31u);
+        } else if (far_lod && !far_component(nm, core)) {
+            continue;
         } else if (s->comp_pcp_count < MAX_COMP_PCP) {
             s->comp_pcp[s->comp_pcp_count++] = (mc3_u16)index;
             s->cpvs_need[index >> 5] |= 1u << (index & 31u);
@@ -2415,6 +2567,28 @@ static int name_has(const char *name, const char *w) {
     }
     return 0;
 }
+// MC2's shop windows and glass doors (Fork City, 2026-10-10): the templates
+// *_breakglass_0Nx / *_breakdoor_01x have no LOD 0 - the pane is the part
+// <name>_glass_0, a 4 x 3 m quad. load_prop_type found nothing to draw and
+// dropped them: the player's "missing glass" pins. Its .phys is BREAK, mass
+// 10, disappearsAfterBreak 1 - see glass_update.
+static __attribute__((noinline)) const char *kw_glass_part() { static const char s[] = "_glass_0"; return s; }
+static mc3_u32 glass_part(const char *name) {
+    State *s = st();
+    char want[64];
+    mc3_u32 n = 0;
+    while (name[n] && n < 48u) { want[n] = name[n]; ++n; }
+    for (const char *k = kw_glass_part(); *k && n < 63u; ++k) want[n++] = *k;
+    want[n] = 0;
+    const mc3_u32 rnt = s->amb_rnt, nrec = word(rnt + 4u);
+    for (mc3_u32 r = 0; r < nrec; ++r) {
+        const mc3_u32 rec = rnt + 0x18u + r * 12u;
+        if (word(rec + 4u) == MOD0 && word(rec) < s->amb_rnt_bytes &&
+            name_equal((const char *)(rnt + word(rec)), want, 64u))
+            return word(rec + 8u);
+    }
+    return 0u;
+}
 static void load_prop_type(PropType *t) {
     State *s = st();
     t->ok = 0;
@@ -2430,13 +2604,23 @@ static void load_prop_type(PropType *t) {
     }
     const mc3_u32 p = prp != 0xFFFFFFFFu ? amb_entry(prp, PRP0) : 0u;
     if (!p) return;
+    t->glass = 0u;
     t->packets = load_mod(word(p), t->pk_addr, t->pk_qwc, t->pk_slot);
+    if (!t->packets) {
+        // a pane: no LOD 0 of its own, the glass is the part <name>_glass_0
+        const mc3_u32 g = glass_part(t->name);
+        if (g) t->packets = load_mod(g, t->pk_addr, t->pk_qwc, t->pk_slot);
+        t->glass = t->packets != 0u;
+    }
     if (!t->packets) return;
-    t->packets2 = load_mod(word(p + 4u), t->pk2_addr, t->pk2_qwc, t->pk2_slot);
+    t->packets2 = t->glass ? 0u : load_mod(word(p + 4u), t->pk2_addr, t->pk2_qwc, t->pk2_slot);
     t->cx = fword((const mc3_u32 *)(p + 8u));
     t->cy = fword((const mc3_u32 *)(p + 12u));
     t->cz = fword((const mc3_u32 *)(p + 16u));
     t->radius = fword((const mc3_u32 *)(p + 20u));
+    if (t->glass) {                // every MC2 pane: x -2..2, y 0..3, z 0
+        t->cx = t->cz = ffrom(0u); t->cy = ffrom(0x3FC00000u); t->radius = ffrom(0x40266666u);
+    }
     // PRP0 +0x18: how many lights; the records (MC2's light_data, 0xC0 each)
     // follow from +0x20 - the entry is 32 + n * 192 bytes
     t->light_n = word(p + 0x18u);
@@ -2485,7 +2669,8 @@ static __attribute__((noinline)) const char *fx_rule_names() {
         "d_prop_hydrant_01x_particle_hydrant_firehydrant02\0"  // N spray, 10 s
         "d_prop_steam_01x_particle_steam_t\0"                  // O always on
         "d_prop_fountain_01x_particle_fountainspray\0"         // P always on
-        "d_prop_telpole_01x_particle_wood\0";                  // Q
+        "d_prop_telpole_01x_particle_wood\0"                   // Q
+        "mc2_prop_breakglass_particle_glass\0";                // R glass (glass_update)
     return s;
 }
 static __attribute__((noinline)) const char *fx_map() {
@@ -2509,7 +2694,8 @@ static __attribute__((noinline)) const char *fx_map() {
         "smokestack,,O\n"
         "cherubpee,,P\n"
         "fountain,,P\n"
-        "sparks,telephone_pole,QI\n";
+        "sparks,telephone_pole,QI\n"
+        "glass,,R\n";
     return s;
 }
 static __attribute__((noinline)) const char *kw_particle() { static const char s[] = "_particle_"; return s; }
@@ -2579,6 +2765,10 @@ static void prop_line(const char *p) {
         while (*q == ' ' || *q == '\t') ++q;
         if (!placement) {                                     // a template
             if (s->prop_type_count >= MAX_PROP_TYPES) return;
+            if (!s->prop_type_count) {             // a new prop file: no panes yet
+                s->glass_count = 0u;
+                for (mc3_u32 k = 0; k < MAX_PROPS / 32u; ++k) s->glass_broken[k] = 0u;
+            }
             PropType *t = &s->prop_types[s->prop_type_count++];
             mc2_load_progress();
             mc3_u32 n = 0;
@@ -2613,6 +2803,7 @@ static void prop_line(const char *p) {
             rec[k] = t->cx * hd->m[0][k] + t->cy * hd->m[1][k] + t->cz * hd->m[2][k] + hd->m[3][k];
         rec[3] = t->radius;
         ((mc3_u32 *)rec)[4] = type;
+        if (t->glass && s->glass_count < MAX_GLASS) s->glass_list[s->glass_count++] = (mc3_u16)i;
         hd->rows = 0;
         return;
     }
@@ -2620,7 +2811,7 @@ static void prop_line(const char *p) {
         PropType *last = &s->prop_types[s->prop_type_count - 1u];
         if (starts(p, kw_fixed())) {
             last->fixed_object = p[12] == ' ' ? p[13] == '1' : p[12] == '1';
-            if (!last->fixed_object && last->has_phys) ph_load_movable(last);
+            if (!last->fixed_object && last->has_phys && !last->glass) ph_load_movable(last);
             return;
         }
         if (starts(p, kw_gfx())) { last->gfx_only = p[8] == ' ' ? p[9] == '1' : p[8] == '1'; return; }
@@ -2652,6 +2843,59 @@ static void prop_line(const char *p) {
     }
 }
 
+// Pillar feet MC2 left without a collision box (Fork City, 2026-10-10: a
+// Tokyo railway frame in the road at -649, 951 - the player's pin; 412 feet in
+// Tokyo, 46 in LA, none in Paris). mc2_pillar_legs.py writes them, one
+// "x y z" per line, to resources/city/mc2_pillars_<mc2 city>.txt (an MC3
+// asset: ASSETS/ on HostFS, ASSETS.DAT from disc); each becomes a placement of the city's
+// dummybound type, so the solid-prop collision and the AI's pillar avoidance
+// treat it like MC2's own. Marker RPLF <added> <type>; RPLE: no file.
+static __attribute__((noinline)) const char *kw_dummybound() { static const char s[] = "dummybound"; return s; }
+static __attribute__((noinline)) const char *kw_pillar_file() { static const char s[] = "$/resources/city/mc2_pillars_"; return s; }
+static __attribute__((noinline)) const char *kw_txt_ext() { static const char s[] = "txt"; return s; }
+static void pillar_feet() {
+    State *s = st();
+    mc3_u32 type = NO_IMAGE;
+    for (mc3_u32 i = 0; i < s->prop_type_count && type == NO_IMAGE; ++i)
+        if (s->prop_types[i].ok && name_has(s->prop_types[i].name, kw_dummybound())) type = i;
+    if (type == NO_IMAGE) return;
+    char path[64];
+    mc3_u32 n = 0;
+    for (const char *k = kw_pillar_file(); *k && n < 40u; ++k) path[n++] = *k;
+    const char *root = mc2_city_root(active_city());          // "mc2/<city>/"
+    if (!root) return;
+    for (const char *c = root + 4; *c && *c != '/' && n < 63u; ++c) path[n++] = *c;
+    path[n] = 0;
+    mc3_u32 bytes, mem;
+    const mc3_u32 h = open_asset(path, kw_txt_ext());
+    const mc3_u32 text = read_whole_h(h, 0x20000u, &bytes, &mem);
+    if (!text) { mark('R','P','L','E', type, h); return; }   // h 0: not found
+    const PropType *t = &s->prop_types[type];
+    const char *p = (const char *)text, *end = p + bytes;
+    mc3_u32 added = 0;
+    while (p < end && s->prop_count < MAX_PROPS) {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
+        if (p >= end) break;
+        if (*p != '#') {
+            float v[3];
+            for (int k = 0; k < 3; ++k) v[k] = parse_float(&p);
+            const mc3_u32 i = s->prop_count++;
+            float *m = (float *)(s->prop_matrices + i * 64u);
+            for (int k = 0; k < 16; ++k) m[k] = ffrom(0u);
+            m[0] = m[5] = m[10] = m[15] = ffrom(0x3F800000u);
+            m[12] = v[0]; m[13] = v[1]; m[14] = v[2];
+            float *rec = (float *)(s->prop_records + i * 20u);
+            rec[0] = v[0] + t->cx; rec[1] = v[1] + t->cy; rec[2] = v[2] + t->cz;
+            rec[3] = t->radius;
+            ((mc3_u32 *)rec)[4] = type;
+            s->prop_moved[i] = 0u; s->ph_slot_of[i] = 0u;
+            ++added;
+        }
+        while (p < end && *p != '\n') ++p;
+    }
+    r_free((void *)mem);
+    mark('R','P','L','F', added, type);
+}
 static void step_props() {
     State *s = st();
     Hood *hd = &s->hood;
@@ -2720,6 +2964,8 @@ static void step_props() {
         mark('R','P','R','P', (s->prop_types_ok << 16) | s->prop_type_count,
              (s->prop_bad << 16) | s->prop_count);
         mark('R','P','R','B', s->amb_loaded, mc3_heap_free(mc3_heap_active()));
+        mark('R','G','L','S', s->glass_count, 0u);
+        pillar_feet();
     }
 }
 
@@ -3716,7 +3962,7 @@ static void ph_update() {
         const mc3_u32 i = s->ph_scan++ % s->prop_count;
         if (s->ph_slot_of[i]) continue;
         const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
-        if (!t->ph_arch || t->gfx_only || t->drivable || t->animated) continue;
+        if (!t->ph_arch || t->gfx_only || t->drivable || t->animated || t->glass) continue;
         const float *m = (const float *)(s->prop_matrices + i * 64u);
         const float dx = m[12] - cp[0], dz = m[14] - cp[2];
         if (dx * dx + dz * dz < near2) ph_add(level, i, t);
@@ -3764,7 +4010,7 @@ static void step_prop_physics() {
                 if (dx > range || dx < -range || dz > range || dz < -range) continue;
                 if (dy > ffrom(0x40800000u) || dy < -ffrom(0x40800000u)) continue;
                 const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
-                if (t->gfx_only || t->drivable) continue;
+                if (t->gfx_only || t->drivable || t->glass) continue;
                 const int solid = t->fixed_object || t->fixed;
                 // a movable prop needs its .phys (mass); a FixedObject one
                 // does not - palms and most trees have none, and the car
@@ -4220,7 +4466,7 @@ static int queue_pcp(mc3_u32 index, mc3_u32 arena) {
                     last = image;
                 } else {
                     const mc3_u32 sw = use_image(image, arena);
-                    if (sw) bind_switch(sw);    // else keep the one in effect
+                    if (sw) bind_texture(sw, addr);    // else keep the one in effect
                 }
             }
             closed = id == 6u || id == 7u;              // ret / end
@@ -4558,6 +4804,84 @@ static void spectate_ai_state(mc3_u32 inst) {
 // Record every opponent at the same 2 s interval. This catches stalls while
 // the spectator camera is watching a different car. RAAS packs opponent index,
 // aiStuck state/count/flag; RAAP is X/Z; RAAU is upright Y and height*16.
+// glass_update (see glass_part): a pane breaks when the player's car or an
+// opponent's reaches its 4 x 3 m rectangle: the car's centre at local
+// |x| < 2.6, y -1..3.5 and |z| < 1.2, or - the player, whose velocity is
+// known - |z| < 2.8 while closing on the plane at 2 m/s or more (MC2's bound
+// often has the shop front as a wall on the pane's plane: the bumper stops
+// there with the centre ~2.3 m away; LA's 3 panes at 523, 36.6 measured
+// with mc2g=90d). It is no longer drawn - it never collided
+// (kept out of the physics: MC2's BREAK with disappearsAfterBreak) - and
+// throws mc2_prop_breakglass_particle_glass: San Diego's shop-window rule
+// (s_prop_breakwin_01x_particle_glass_s) on tiles 56-59 of the MC2 cities'
+// particle atlas, where SD's shards were pasted (unused tiles of Detroit's).
+// Whole again when the props load again or a race starts (glass_reset).
+// [boot] glas = 0: panes never break. Marker RGLB <prop> <breaks so far>.
+static void glass_break(mc3_u32 i) {
+    State *s = st();
+    s->glass_broken[i >> 5] |= 1u << (i & 31u);
+    ++s->glass_breaks;
+    const float *m = (const float *)(s->prop_matrices + i * 64u);
+    const PropType *t = &s->prop_types[((const mc3_u32 *)(s->prop_records + i * 20u))[4]];
+    if (s->fx_state == 9u && fx_enabled())
+        for (mc3_u32 j = 0; j < t->fx_count; ++j) {
+            const mc3_u32 rule = s->fx_rules[t->fx[j]];
+            if (rule) fx_emit(rule, m, fx_count(rule), 0);
+        }
+    mark('R','G','L','B', i, s->glass_breaks);
+}
+static void glass_reset() {
+    State *s = st();
+    if (!s) return;
+    for (mc3_u32 k = 0; k < MAX_PROPS / 32u; ++k) s->glass_broken[k] = 0u;
+}
+static void glass_update() {
+    State *s = st();
+    if (!s->glass_count) return;
+    const char *v = mc3_bootarg(MC3_ID('g','l','a','s'));
+    if (v && v[0] == '0') return;
+    float car[17][3], vel[3] = { ffrom(0u), ffrom(0u), ffrom(0u) };
+    mc3_u32 cars = 0;
+    float *cp, *cv;
+    if (player_motion(&cp, &cv)) {
+        car[0][0] = cp[0]; car[0][1] = cp[1]; car[0][2] = cp[2]; cars = 1;
+        vel[0] = cv[0]; vel[1] = cv[1]; vel[2] = cv[2];
+    }
+    const mc3_u32 mgr = word(AI_MANAGER);
+    if (ptr(mgr) && word(mgr) <= 16u && ptr(word(mgr + 8u)))
+        for (mc3_u32 k = 0; k < word(mgr); ++k) {
+            const mc3_u32 c = word(word(mgr + 8u) + k * AI_OPPONENT_SIZE + 36u);
+            const mc3_u32 inst = ptr(c) ? word(c + 24u) : 0u;
+            if (!ptr(inst)) continue;
+            const float *m = (const float *)(inst + 0x10u);
+            car[cars][0] = m[9]; car[cars][1] = m[10]; car[cars][2] = m[11]; ++cars;
+        }
+    if (!cars) return;
+    const float near2 = ffrom(0x42100000u);            // 36 = 6 m
+    const float hx = ffrom(0x40266666u), hz = ffrom(0x3F99999Au);   // 2.6, 1.2
+    const float hz_fast = ffrom(0x40333333u), closing = ffrom(0x40000000u);   // 2.8, 2 m/s
+    const float y0 = ffrom(0xBF800000u), y1 = ffrom(0x40600000u);   // -1, 3.5
+    for (mc3_u32 g = 0; g < s->glass_count; ++g) {
+        const mc3_u32 i = s->glass_list[g];
+        if ((s->glass_broken[i >> 5] >> (i & 31u)) & 1u) continue;
+        const float *m = (const float *)(s->prop_matrices + i * 64u);
+        for (mc3_u32 c = 0; c < cars; ++c) {
+            const float dx = car[c][0] - m[12], dy = car[c][1] - m[13], dz = car[c][2] - m[14];
+            if (dx * dx + dz * dz > near2) continue;
+            const float lx = dx * m[0] + dy * m[1] + dz * m[2];
+            const float ly = dx * m[4] + dy * m[5] + dz * m[6];
+            const float lz = dx * m[8] + dy * m[9] + dz * m[10];
+            if (lx > hx || lx < -hx || ly < y0 || ly > y1) continue;
+            if (lz > hz || lz < -hz) {
+                if (c || lz > hz_fast || lz < -hz_fast) continue;
+                const float vz = vel[0] * m[8] + vel[1] * m[9] + vel[2] * m[10];
+                if (!(lz > ffrom(0u) ? -vz >= closing : vz >= closing)) continue;
+            }
+            glass_break(i);
+            break;
+        }
+    }
+}
 static void spectate_all_ai_states() {
     const mc3_u32 mgr = word(AI_MANAGER);
     if (!ptr(mgr)) return;
@@ -5291,6 +5615,7 @@ static void reflect_mask_pass(mc3_u32 arena) {
             w = ad_begin(arena, 2u);
             if (w) {
                 ad_put(w, 0, 0x44u, 0u, 0x42u + ctx);        // the city's ALPHA again
+                s->bound_additive = 0u;
                 ad_put(w, 1, 0x5100Fu, 0u, 0x47u + ctx);
             }
         }
@@ -5370,6 +5695,18 @@ static void draw_city() {
     s->frame_pcp = s->frame_pmd = s->frame_pcp_failed = s->frame_skipped = 0;
     s->frame_props = 0;
     s->bound_switch = 0;
+    s->bound_additive = 0;                 // the bootstrap sets ALPHA 0x44
+    s->bound_test = 0;                     // ... and TEST 0x5100F
+    s->mat_live = 0;
+    {
+        const char *v = mc3_bootarg(MC3_ID('s','o','f','t'));
+        s->soft_on = !(v && v[0] == '0');
+    }
+    s->additive_on = (mc3_u32)additive_enabled();
+    {   // [boot] mc2i = 0: lit-window layers in file order (after their facade)
+        const char *v = mc3_bootarg(MC3_ID('m','c','2','i'));
+        s->lit_first_on = !(v && v[0] == '0') && !s->additive_on;
+    }
     s->pcp_limit = cpvs_limit();
     {   // [boot] mc2w = 1: every texture white (diagnostic)
         const char *v = mc3_bootarg(MC3_ID('m','c','2','w'));
@@ -5396,9 +5733,22 @@ static void draw_city() {
     const float eye_x = fword((const mc3_u32 *)(s->camera + 36u));
     const float eye_y = fword((const mc3_u32 *)(s->camera + 40u));
     const float eye_z = fword((const mc3_u32 *)(s->camera + 44u));
+    // draw_lit_first: the lit-window layers before every facade (see
+    // bind_texture). They write Z on the facade's own plane, so drawing them
+    // all first equals drawing each before its own facade.
+    const int lit_first = s->lit_first_on;
+    s->mat_live = 1u;
+    for (mc3_u32 i = 0; lit_first && i < s->target_count; ++i) {
+        Piece *piece = &s->pieces[i];
+        if (!piece->ready || !piece->lit || s->targets[i].flags != 0u) continue;
+        if (!piece_visible(piece, &s->targets[i])) continue;
+        queue_ref(piece->packet, 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
+        queue_piece(piece, arena);
+    }
     for (mc3_u32 i = 0; i < s->target_count; ++i) {
         Piece *piece = &s->pieces[i];
         if (!piece->ready || s->targets[i].flags != 0u) continue;
+        if (lit_first && piece->lit) continue;
         if (!piece_visible(piece, &s->targets[i])) continue;
         const mc3_u32 m = (use_cpvs & 1u) ? map_targets[i] : 0u;
         if ((m & CPVS_COVERED) && !(m & 0xFFFFu)) continue;  // another record draws it
@@ -5434,6 +5784,12 @@ static void draw_city() {
         ++visible_instances;
         visible_count += model->count;
         queue_ref(instance_matrix(s, i), 4u, VIF_FLUSH, VIF_UNPACK_MATRIX);
+        mc3_u32 lit = 0u;                     // draw_lit_first, per instance
+        for (mc3_u32 j = 0; lit_first && j < model->count && j < 4u; ++j)
+            if (s->pieces[model->pieces[j]].lit) {
+                lit |= 1u << j;
+                queue_piece(&s->pieces[model->pieces[j]], arena);
+            }
         const mc3_u32 m = (use_cpvs & 2u) ? map_instances[i] : 0u;
         const mc3_u32 refl = (use_cpvs & 2u) && s->inst_refl ? s->inst_refl[i] : 0u;
         if ((m & 0xFFFFu) || refl) {
@@ -5445,14 +5801,15 @@ static void draw_city() {
                     flat |= (m >> 20) & 15u;
                 }
                 for (mc3_u32 j = 0; j < model->count && j < 4u; ++j)
-                    if (flat & (1u << j))
+                    if ((flat & ~lit) & (1u << j))
                         queue_piece(&s->pieces[model->pieces[j]], arena);
                 continue;
             }
             ++s->frame_pcp_failed;
         }
         for (mc3_u32 j = 0; j < model->count; ++j)
-            queue_piece(&s->pieces[model->pieces[j]], arena);
+            if (j >= 4u || !(lit & (1u << j)))
+                queue_piece(&s->pieces[model->pieces[j]], arena);
     }
     s->prof[2] += cycles_now() - pc; pc = cycles_now();
     // MC2 props, after the city so their cut-outs blend over it
@@ -5468,6 +5825,7 @@ static void draw_city() {
         const float *rec = (const float *)(s->prop_records + i * 20u);
         const PropType *t = &s->prop_types[((const mc3_u32 *)rec)[4]];
         if (!t->packets) continue;                  // particles only (steam vent)
+        if (t->glass && ((s->glass_broken[i >> 5] >> (i & 31u)) & 1u)) continue;
         const float dx = rec[0] - cam_x, dy = rec[1] - cam_y, dz = rec[2] - cam_z;
         const float d2 = dx * dx + dy * dy + dz * dz;
         // MC2 draws only Far props at a distance; the rest end at PROP_NEAR
@@ -5476,6 +5834,8 @@ static void draw_city() {
         queue_prop(i, arena, d2 > prop_lod2);
     }
     queue_pins(arena);
+    set_blend(0); set_test(0);             // the city's own state for what follows
+    s->mat_live = 0u;
     s->prof[3] += cycles_now() - pc; pc = cycles_now();
     if (split) reflect_mask_pass(arena);
     else no_cpvs_alpha_pass(arena);
@@ -5690,6 +6050,7 @@ static void set_camera_hook_body(mc3_u32 camera) {
         step_prop_anim();
         ph_update();
         step_prop_physics();
+        glass_update();
         s->cyc_phys += cycles_now() - c; c = cycles_now();
         step_prop_fx();
         s->cyc_fx += cycles_now() - c; c = cycles_now();
@@ -6002,7 +6363,11 @@ MC3_HOOK(START_RACE_CALL, start_race_hook);
 // front end; preload_city loads it again at StartRace. (The MCLA PSP fork
 // does the same for its slots, 2026-10-06.) Marker RNXR <city> <top free>.
 enum { ENTER_GAME_CALL = 0x001A5620, ENTER_GAME = 0x001A5700 };
+static void vu1_tbit_off();
+static void glass_reset();
 extern "C" mc3_u32 enter_game_hook(mc3_u32 game_state) {
+    vu1_tbit_off();                    // once: modules with hooks get no mod_main call
+    glass_reset();                     // every pane whole again
     const mc3_u32 cfg = word(RACE_CONFIG_CURRENT);
     const mc3_u32 city = ptr(cfg) ? word(cfg) : 0xFFFFFFFFu;
     if (mc2_city_supported(city)) {
@@ -6043,6 +6408,134 @@ extern "C" mc3_u32 stop_loading_hook() {
     return r;
 }
 MC3_HOOK(STOP_LOADING_CALL, stop_loading_hook);
+
+// Opponents around MC2's road pillars (Fork City, 2026-10-10). MC2 puts an
+// invisible collision box under each pillar standing in a road -
+// `*_prop_dummybound_*` (FixedObject + Obstacle; LA's is 1.4 x 6 x 2.7 m,
+// usually three in a row under an overpass: LA 44, Paris 92, Tokyo 111) -
+// whose collision only this renderer does. MC3's AI drives the road's centre
+// line and never heard of them: in LA's Moses Checkpoint One the opponents
+// hit the pillars of (700, -332) at speed and stood there ~13 s.
+// aiOpponent::Update (0x4034A0) ends with brain target -> AvoidObstacles ->
+// AvoidSideswipe -> sub_4032F8(opponent, &target (+152), turn speed in $f12),
+// which hands the target to aiInput::SetTarget. Its jal (0x40393C) comes here:
+// when the segment car -> target passes within PILLAR_CLEAR of a pillar
+// ahead, the target moves beside the pillar (PILLAR_PASS from it, on the side
+// the car is already on, then on parallel to the old direction), so nothing
+// after this rewrites it. Past the pillar the native target is back.
+// [boot] mc2v = 0 turns it off. Marker RAPV <adjusted frames> <pillars>
+// every 600 adjustments.
+enum { AI_STEER_CALL = 0x0040393C, AI_STEER = 0x004032F8, MAX_PILLARS = 640 };   // Tokyo 111 + 412 (pillar_feet)
+struct Pillars { mc3_u32 state, count, adjusted, prop_count; float xz[MAX_PILLARS][2]; };
+static __attribute__((noinline)) Pillars *pillars() { static Pillars p; return &p; }
+static __attribute__((noinline)) const char *pillar_word() { static const char w[] = "dummybound"; return w; }
+static int pillars_ready() {
+    Pillars *p = pillars();
+    State *s = st();
+    if (!s || !s->props_ready || !in_mc2_city()) { p->state = 0u; return 0; }
+    if (p->state == 1u && p->prop_count == s->prop_count) return p->count != 0u;
+    p->state = 1u; p->count = 0u; p->prop_count = s->prop_count;
+    const char *v = mc3_bootarg(MC3_ID('m','c','2','v'));
+    if (v && v[0] == '0') return 0;
+    for (mc3_u32 i = 0; i < s->prop_count && p->count < (mc3_u32)MAX_PILLARS; ++i) {
+        const float *rec = (const float *)(s->prop_records + i * 20u);
+        const char *name = s->prop_types[((const mc3_u32 *)rec)[4]].name;
+        int k = 0, found = 0;
+        const char *w = pillar_word();
+        for (; name[k] && k < 40; ++k) {
+            int j = 0;
+            while (w[j] && name[k + j] == w[j]) ++j;
+            if (!w[j]) { found = 1; break; }
+        }
+        if (!found) continue;
+        p->xz[p->count][0] = rec[0];
+        p->xz[p->count][1] = rec[2];
+        ++p->count;
+    }
+    return p->count != 0u;
+}
+extern "C" void ai_avoid_pillars(mc3_u32 opp, mc3_u32 target) {
+    if (!pillars_ready()) return;
+    const mc3_u32 car = word(opp + 36u);
+    const mc3_u32 inst = ptr(car) ? word(car + 24u) : 0u;
+    if (!ptr(inst) || !ptr(target)) return;
+    const float *m = (const float *)(inst + 0x10u);
+    float *t = (float *)target;
+    const float px = m[9], pz = m[11];
+    float dx = t[0] - px, dz = t[2] - pz;
+    const float len = fsqrt(dx * dx + dz * dz);
+    const float one = ffrom(0x3F800000u);
+    if (!(len > one)) return;
+    const float ux = dx / len, uz = dz / len;      // along the path
+    const float nx = -uz, nz = ux;                  // its left
+    const float clear = ffrom(0x404CCCCDu), pass = ffrom(0x40600000u);
+    Pillars *p = pillars();
+    int best = -1;
+    float best_along = ffrom(0x4E6E6B28u), best_side = 0.0f;
+    const float back = ffrom(0xC0000000u), beyond = ffrom(0x40400000u), look = ffrom(0x42700000u);
+    for (mc3_u32 i = 0; i < p->count; ++i) {
+        const float cx = p->xz[i][0] - px, cz = p->xz[i][1] - pz;
+        const float along = cx * ux + cz * uz;
+        if (along < back || along > len + beyond || along > look) continue;
+        const float side = cx * nx + cz * nz;
+        if (side > clear || side < -clear) continue;
+        if (along < best_along) { best_along = along; best_side = side; best = (int)i; }
+    }
+    if (best < 0) return;
+    // pass on the side away from the pillar; a pillar dead ahead is passed
+    // keeping it on the left
+    const float edge = ffrom(0x3E99999Au);
+    const float dir = best_side < -edge ? one : -one;
+    const float bx = p->xz[best][0] + nx * dir * pass, bz = p->xz[best][1] + nz * dir * pass;
+    const float rest = len - best_along > 0.0f ? len - best_along : 0.0f;
+    t[0] = bx + ux * rest;
+    t[2] = bz + uz * rest;
+    if (!(++p->adjusted % 600u)) mark('R','A','P','V', p->adjusted, p->count);
+}
+// Bridge: $f12 (the turn speed) and the FPU registers the game keeps across
+// calls survive the C call, then the original runs as if called directly.
+extern "C" void ai_steer_hook();
+__asm__(".set push\n.set noreorder\n.text\n.align 3\n.globl ai_steer_hook\nai_steer_hook:\n"
+    "addiu $sp, $sp, -96\n"
+    "sd $31, 0($sp)\nsd $4, 8($sp)\nsd $5, 16($sp)\n"
+    "swc1 $f12, 24($sp)\nswc1 $f20, 28($sp)\nswc1 $f21, 32($sp)\nswc1 $f22, 36($sp)\n"
+    "swc1 $f23, 40($sp)\nswc1 $f24, 44($sp)\nswc1 $f25, 48($sp)\nswc1 $f26, 52($sp)\n"
+    "swc1 $f27, 56($sp)\nswc1 $f28, 60($sp)\nswc1 $f29, 64($sp)\nswc1 $f30, 68($sp)\nswc1 $f31, 72($sp)\n"
+    "jal ai_avoid_pillars\nnop\n"
+    "ld $31, 0($sp)\nld $4, 8($sp)\nld $5, 16($sp)\n"
+    "lwc1 $f12, 24($sp)\nlwc1 $f20, 28($sp)\nlwc1 $f21, 32($sp)\nlwc1 $f22, 36($sp)\n"
+    "lwc1 $f23, 40($sp)\nlwc1 $f24, 44($sp)\nlwc1 $f25, 48($sp)\nlwc1 $f26, 52($sp)\n"
+    "lwc1 $f27, 56($sp)\nlwc1 $f28, 60($sp)\nlwc1 $f29, 64($sp)\nlwc1 $f30, 68($sp)\nlwc1 $f31, 72($sp)\n"
+    "addiu $sp, $sp, 96\n"
+    "lui $25, 0x0040\nori $25, $25, 0x32F8\njr $25\nnop\n.set pop\n");
+MC3_HOOK(AI_STEER_CALL, ai_steer_hook);
+
+// VU1 T-bit (Fork City, 2026-10-10). Graphics init (0x528CA0, run once from
+// 0x5A87EC) ORs 0x800 - TE1, the VU1 T-bit interrupt enable - into FBRST
+// (`ori v1,v1,0x800` at 0x52907C, then ctc2 to vi28). Nothing uses it, but with
+// it on PCSX2's MTVU has to wait for VU1 at every program, and this renderer
+// kicks thousands a frame. PCSX2's GameDB removes it for the retail ELF
+// (SLUS-21355, CRC 60A42FF5: 'Patch by Refraction'; Midnight Club II has the
+// same one) - under mc3boot the active CRC is mc3boot's, so the patch never
+// applied (the instruction was intact in RAM). Same patch here: the ori becomes
+// a NOP (checked against the measured word) and TE1 is cleared now, as init
+// has usually run already. Harmless on a real PS2 - no microcode sets T.
+// [boot] tbit = 1 leaves it as the game sets it.
+enum { TBIT_ORI = 0x0052907C, TBIT_ORI_WORD = 0x34630800 };
+static void vu1_tbit_off() {
+    const char *v = mc3_bootarg(MC3_ID('t','b','i','t'));
+    if (v && v[0] == '1') return;
+    volatile mc3_u32 *ori = (volatile mc3_u32 *)TBIT_ORI;
+    if (*ori != (mc3_u32)TBIT_ORI_WORD) return;       // not the retail ELF
+    *ori = 0u;
+    MC3_CALL1(void, FLUSH_CACHE, int)(0);
+    MC3_CALL1(void, FLUSH_CACHE, int)(2);
+    mc3_u32 fbrst;
+    __asm__ volatile(".word 0x4848E000\n\tnop\n\tmove %0, $8" : "=r"(fbrst) : : "$8");  // cfc2 $8, vi28
+    fbrst &= ~0x800u;
+    __asm__ volatile("move $8, %0\n\t.word 0x48C8E000\n\tnop" : : "r"(fbrst) : "$8");   // ctc2 $8, vi28
+    mark('V','T','B','T', fbrst, 0u);
+}
 
 extern "C" void mod_main() __attribute__((section(".text.start")));
 extern "C" void mod_main() { }

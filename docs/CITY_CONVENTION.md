@@ -284,3 +284,44 @@ the disc backend they are opened by their logical name, without
 `PSHE <city>/0`. HostFS keeps its loose profiles. The RHF format/fingerprint
 and the original data do not change; check PSRH active and the 770/369 counts
 when packing.
+
+## 8. Occlusion volumes belong to their source city (2026-10-10)
+
+Do not inherit a donor city's world-space `.occlude` when replacing its map.
+MC3 uses these volumes to cull native cars and pedestrians, independently of
+the custom map renderer. The PSP shells inherited all 455 LA MC2 volumes;
+one enclosed a Tokyo PSP street and hid the player/traffic. Software and
+D3D12 reproduced the failure and the reversible removal of those volumes.
+
+Until source-specific occluders are converted and validated, LA PSP and Tokyo
+PSP use a native version-3 dataset with `num_geoms: 0`, `num_primitives: 0`.
+Keep the other cities' datasets. The PSP shell preparers call
+`Claudio/mcla_psp_runtime/psp_occlusion.py`, which recognizes the inherited LA
+dataset and refuses to replace unknown data. A future PSP occlusion converter
+must update this policy explicitly. Include the corrected loose files in
+`ASSETS.DAT` for a disc build. Test with a fresh city load: old savestates
+restore the old resident volumes.
+
+## 9. Module data files, module size and pillar collision (2026-10-10)
+
+- A data file a city module reads during the city load (inside
+  `mcLayerCity::InitPhys`, the props, anything under the loading screen) is an
+  MC3 asset: open it with `datAssetManager::Open("$/resources/city/<name>",
+  "txt", 0, 1, 0x620000)` (vtable +36 of `*0x6D557C`), the call `LoadBuild`
+  makes. It is found in `ASSETS/resources/city/` on HostFS and in `ASSETS.DAT`
+  from the disc. A plain `Stream::Open` of a relative path outside MC2.DAT
+  hung the load (Loading screen, no marker).
+- A module loaded as `shim` must stay under **64 KB** (`mod_buf[65536]` in
+  mc3boot.c), zero-filled static tables included. At 71 KB the game froze on
+  the Loading screen with no message. Check the `.mod` size after growing a
+  static table.
+- Pillar collision is per **foot**: `mc2_pillar_legs.py --solid` writes
+  `mc2_solid_<city>.txt` (one box per foot, ground to 5 m), which the city
+  bound uses instead of the instance's `.hood` box - a Tokyo railway pylon's
+  box holds its arm, and walls built from it closed the road under it. Feet
+  MC2 left without a `dummybound` (`--out`, `mc2_pillars_<city>.txt`) become
+  dummybounds when the props load. Both files go into `ASSETS.DAT` for a disc
+  build. Markers RBN6 (boxes read) and RPLF (feet added).
+- `[boot]`: since mc3boot b1a329a the table grows with the `.ini` (up to 128
+  keys), but a module built with the older `mc3_bootargs.h` reads only the
+  first 16. Put test keys first, or rebuild the module.

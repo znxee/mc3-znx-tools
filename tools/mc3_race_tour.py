@@ -38,9 +38,19 @@ def races_from_locinf(city):
     return out
 
 
-def boot_section(ini_bytes, keys):
+BOOT_ARGS_CAP = 16     # what a module built before mc3boot b1a329a sees of [boot] (first 16 slots)
+
+
+def boot_section(ini_bytes, keys, last_prefix=None):
     """Set `keys` (ordered) in the [boot] section; its other keys (mc2r, mc2e...)
-    are kept. Keeps line endings."""
+    are kept AFTER them. A module built before mc3boot b1a329a (race_nofe
+    among them) reads only the first BOOT_ARGS_CAP keys (folded to their first
+    4 characters), and an older mc3boot stores no more: the Alpha's ini already
+    holds 16, so keys appended at the end (nofe, rnam...) never reached
+    race_nofe and the tour sat on the title screen. Keeps line
+    endings; prints the keys that do not fit. Keys starting with `last_prefix`
+    (b'ps': the PSP renderer's, useless in an MC2 city) go to the end, so the
+    ones that matter are the ones kept."""
     nl = b'\r\n' if b'\r\n' in ini_bytes else b'\n'
     i = ini_bytes.index(b'[boot]')
     j = ini_bytes.find(b'\n[', i + 1)
@@ -51,7 +61,21 @@ def boot_section(ini_bytes, keys):
         s = line.strip()
         if s and not s.startswith(b';') and b'=' in s and s.split(b'=')[0].strip().decode() not in names:
             kept.append(s + nl)
-    body = b''.join(kept) + b''.join(('%s = %s' % kv).encode() + nl for kv in keys)
+    if last_prefix:
+        kept = [k for k in kept if not k.startswith(last_prefix)] + [k for k in kept if k.startswith(last_prefix)]
+    lines = [('%s = %s' % kv).encode() + nl for kv in keys] + kept
+    slots, dropped = [], []
+    for l in lines:
+        slot = l.split(b'=')[0].strip()[:4]
+        if slot in slots:
+            continue
+        if len(slots) < BOOT_ARGS_CAP:
+            slots.append(slot)
+        else:
+            dropped.append(l.split(b'=')[0].strip().decode())
+    if dropped:
+        print('  [boot] over %d keys, older modules miss: %s' % (BOOT_ARGS_CAP, ' '.join(dropped)), flush=True)
+    body = b''.join(lines)
     return ini_bytes[:i] + b'[boot]' + nl + body + (nl + tail if tail else b'')
 
 
@@ -108,11 +132,20 @@ def main():
             keys = [('rnam', short), ('rscw', 1), ('city', a.city), ('time', tod),
                     ('weather', weather), ('racetype', rtype), ('car', a.car),
                     ('mc2s', '%d%s' % (a.spectate, 'c' if a.chase else 'f' if a.follow else '')), ('nofe', 1)]
-            ini = boot_section(original, keys)
-            if a.add_mod:
+            ini = boot_section(original, keys, None if 'psp' in a.city else b'ps')
+            add = list(a.add_mod)
+            mods = ini[ini.index(b'[mods]'):]
+            mods = mods[:mods.find(b'\n[', 1)] if b'\n[' in mods[1:] else mods
+            # the boot into the race is race_nofe's: an install without it
+            # in [mods] (the Alpha) stayed on the title screen
+            if not re.search(rb'^\s*race_nofe\.mod\s*=\s*[1-9a-z]', mods, re.M) and \
+                    os.path.exists(os.path.join(a.root, 'race_nofe.mod')) and \
+                    not any('race_nofe' in m for m in add):
+                add.append('race_nofe.mod = shim')
+            if add:
                 nl = b'\r\n' if b'\r\n' in ini else b'\n'
                 k = ini.index(b'[mods]') + len(b'[mods]') + len(nl)
-                ini = ini[:k] + b''.join(m.encode() + nl for m in a.add_mod) + ini[k:]
+                ini = ini[:k] + b''.join(m.encode() + nl for m in add) + ini[k:]
             open(INI, 'wb').write(ini)
             at = []
             t = a.start

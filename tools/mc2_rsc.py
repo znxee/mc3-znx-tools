@@ -764,7 +764,7 @@ def read_pcp(rsc, cpvs, index):
     return drawn
 
 
-_PCP_INST = re.compile(r'^(.*?)_(l_inst_.*?)(\d+)_(\d+)_(main|refl)$', re.I)
+_PCP_INST = re.compile(r'^(.*?)_([lpt]_inst_.*?)(\d+)_(\d+)_(main|refl)$', re.I)   # LA l_, Paris p_, Tokyo t_
 _PCP_COMP = re.compile(r'^(.*?)_(\d+)_(main|refl)$')
 
 

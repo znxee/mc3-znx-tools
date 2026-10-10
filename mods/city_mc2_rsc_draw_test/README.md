@@ -994,3 +994,42 @@ camera the user placed: target 684.362,8.108,483.404, look-at
 688.185,8.290,483.542. Marker RFEE <city> <blocks>. `[boot] fesd = 1` restores
 the San Diego fallback (which overran the heap in LAN). Tested: Arcade LA ->
 menus -> Paris race; LAN LA -> lobby -> second race.
+
+### Pins round: lit windows, glass, pillars, sky cap (2026-10-10)
+
+Ported from the combined renderer (city_original_maps), where they were
+tested in PCSX2 on the player's pins; this copy builds and boots Tokyo (MC2)
+with the same markers.
+
+- **Lit windows.** The batches a PMD0 kicks with MSCAL 4 - and only those -
+  use the night-window textures (lit windows on black). Such a PMD0 is always
+  the second piece of the model whose first is the facade, on its plane, and
+  the facade's window textures are partly translucent: it is the light inside.
+  It is drawn before the facade (Piece.lit). `[boot] mc2i = 0` keeps file order.
+- **Translucent texels.** A city/ambients texture (TCC=1) with 4% or more of
+  its texels at alpha 1..0x5F is `soft`: TEST_1 0x5160B while bound (alpha
+  GEQUAL 0x60, FB_ONLY), so glass blends but writes no depth (Louvre pyramid,
+  shop windows). `[boot] soft = 0` turns it off.
+- **4bpp over one GS page** (Paris p_props_tree01 256x256, tunnel02, Tokyo
+  sign60/61): rect4's rule continues, 64 blocks = 64x64 words DBW 1, 128 =
+  128x64 DBW 2. **8bpp below 16x16** (the 8x8 sky caps) uploads the whole
+  PSMT8 block.
+- **Far-only models** (no near LOD) take their `_1_main/_1_refl` CPVS chains
+  (ModelDraw MODEL_FAR_ONLY = 2; bit 1 stays "instance type"). MAX_COMP_PCP
+  1024 (Tokyo has 629 component chains).
+- **Glass.** Breakglass/breakdoor templates have no LOD 0; the pane is the part
+  `<template>_glass_0` (a 4 x 3 m quad). Drawn, kept out of the physics, and
+  broken by glass_update when a car reaches it: hidden, and the
+  `mc2_prop_breakglass_particle_glass` rule throws shards (San Diego's
+  shop-window rule on tiles 56-59 of the MC2 cities' particle atlas, where
+  SD's shards are pasted). `[boot] glas = 0`; markers RGLS/RGLB.
+- **Pillars.** pillar_feet adds a dummybound at each foot listed in
+  `$/resources/city/mc2_pillars_<city>.txt` (mc2_pillar_legs.py); the AI
+  steers around every dummybound (hook on jal 0x40393C, `[boot] mc2v = 0`).
+- **VU1 T-bit.** Graphics init sets FBRST TE1; PCSX2's GameDB patch for it is
+  keyed by the retail CRC and never applies under mc3boot. Cleared at the first
+  race (marker VTBT); `[boot] tbit = 1` leaves it.
+
+Known: in this copy the props are loaded later than in the combined renderer
+and on a full heap some prop types fail (62-86 of 115 in Tokyo), so the
+pillar list can be skipped (no RPLF). The combined renderer loads them all.

@@ -71,7 +71,7 @@ enum {
     QUAD_MAX = 2000,                  // phQuadtreeCell::ClassInit(2000,2000)
     MAX_CELLS = 64,
     MAX_HANDLES = 32,
-    MAX_SOLID = 256,                  // instance boxes added as walls (pillars)
+    MAX_SOLID = 640,                  // walls (pillar feet; Tokyo 614) - static: the .mod must stay under 64 KB
     HOOD_CHUNK = 4096,
     HEAP_MARGIN = 0x40000,
     CHUNK = 0x10000,
@@ -504,8 +504,11 @@ static float parse_f(const char **pp) {
     return neg ? -v : v;
 }
 // Calls line(text, arg) for every line of a HostFS text file.
+static int each_line_h(mc3_u32 h, void (*line)(char *, char *), char *arg);
 static int each_line(const char *path, void (*line)(char *, char *), char *arg) {
-    const mc3_u32 h = md_open(path);
+    return each_line_h(md_open(path), line, arg);
+}
+static int each_line_h(mc3_u32 h, void (*line)(char *, char *), char *arg) {
     if (!h) return 0;
     char *b = G()->line;
     mc3_u32 have = 0;
@@ -573,8 +576,48 @@ static void lvl_line(char *l, char *names) {
     for (mc3_u32 i = 0; i < len; ++i) names[at + i] = n[i];
     names[at + len] = 0;
 }
+// resources/city/mc2_solid_<mc2 city>.txt (mc2_pillar_legs.py --solid), when present,
+// replaces the .hood boxes: one box per pillar FOOT, ground to 5 m (Fork City,
+// 2026-10-10). A Tokyo railway pylon's .hood box holds its arm too (z 946..974
+// for the one at -647, 967 whose foot is 2.4 m long): its four walls closed
+// the road under the arm - the player's invisible wall at -649, 951, where
+// 7 of the 8 opponents of the first Tokyo race stood ~25 s. One "x0 y0 z0 x1
+// y1 z1" line per foot; '#' lines skipped. Marker RBN6 <boxes from the file>.
+static __attribute__((noinline)) const char *kw_solid_file() { static const char s[] = "$/resources/city/mc2_solid_"; return s; }
+static __attribute__((noinline)) const char *kw_solid_ext() { static const char s[] = "txt"; return s; }
+static void solid_line(char *l, char *arg) {
+    (void)arg;
+    while (*l == ' ' || *l == '\t') ++l;
+    if (*l == '#' || *l == 0 || *l == '\r' || G()->solids >= MAX_SOLID) return;
+    const char *p = l;
+    float *box = G()->solid[G()->solids];
+    for (int k = 0; k < 6; ++k) box[k] = parse_f(&p);
+    if (box[3] > box[0] && box[4] > box[1] && box[5] > box[2]) ++G()->solids;
+}
+static int solid_file() {
+    const char *root = mc2_city_root(current_city());          // "mc2/<city>/"
+    if (!root) return 0;
+    char path[64];
+    mc3_u32 n = 0;
+    for (const char *k = kw_solid_file(); *k && n < 40u; ++k) path[n++] = *k;
+    for (const char *c = root + 4; *c && *c != '/' && n < 63u; ++c) path[n++] = *c;
+    path[n] = 0;
+    G()->solids = 0;
+    // through datAssetManager like tokyo_bnd: a plain Stream::Open of a path
+    // outside MC2.DAT hung the load (Loading screen, no RBN marker)
+    const mc3_u32 mgr = *(volatile mc3_u32 *)ASSET_MANAGER;
+    if (!mc3_ptr_ok(mgr)) return 0;
+    const mc3_u32 open = *(volatile mc3_u32 *)(*(volatile mc3_u32 *)mgr + 36u);
+    const mc3_u32 h = MC3_CALL6(mc3_u32, open, mc3_u32, const char *, mc3_u32, int, int, int)
+        (mgr, path, (mc3_u32)kw_solid_ext(), 0, 1, 0x620000);
+    if (!each_line_h(h, solid_line, 0)) return 0;
+    mark('R','B','N','6', G()->solids, 0u);
+    return G()->solids != 0u;
+}
 static void solid_instances() {
     G()->solids = G()->hoods = 0;
+    if (solid_file()) return;
+    G()->solids = 0;
     char names[32 * 32];
     for (mc3_u32 i = 0; i < sizeof(names); ++i) names[i] = 0;
     char path[128];
