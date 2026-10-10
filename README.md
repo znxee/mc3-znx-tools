@@ -72,6 +72,10 @@ the finding behind the tool, and `python TOOL.py --help` lists its options.
   counting presses; `peek` prints words of RAM over the same connection (PINE
   takes one client at a time). `tools/mc3_city_check.py` checks an install's
   city shells against `docs/CITY_CONVENTION.md`.
+- `mods/city_mc2_rsc_draw_test/mc2_loading.h`: the loading screen of an MC2
+  city stays up until the city is loaded, with a status line ("Reading map
+  N / M KiB", "Loading objects N"...); the early end-of-animation requests
+  are held back until then.
 - `mods/city_frontend_2d`: the frontend of an added city drawn flat on the
   screen, like the pause menu, instead of as a panel standing in the city
   (section 5 of the convention).

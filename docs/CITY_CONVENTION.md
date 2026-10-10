@@ -106,6 +106,22 @@ null heap.
     EE/visibility caches and only then let the (already intercepted)
     `StartRace` run. Keep no new font/atlas allocation in the heap: reuse an
     existing font and release its reference after joining the thread.
+  - **MC2 cities (5, 6, 7), since 2026-10-10:** the same gate. The
+    `0x1A5620` hook starts the state for an MC2 destination, the signal hook
+    holds back the end of the animation and `0x1A585C` loads the whole MC2
+    city (`preload_city(1)`) with the screen up, publishing the stage:
+    "Reading map N / M KiB", "Preparing textures", "Placing buildings N / M",
+    "Applying colours N / M", "Loading objects N" (prop types + placements;
+    the total is only known at the end) and "Loading sky". The new stages
+    come after the PSP ones in the enum, so their numbers do not move. The
+    "LA Remix" title over the Flash stays PSP-only; the MC2 names fit the
+    native field. Difference: a memory wait (textures 3/5, CPVS state 5) while
+    the LoadHeap is alive is not an error - the screen goes and `StartRace`
+    finishes the load after the LoadHeap is freed, retrying at once.
+    Markers `PLRQ`, `PLPH`, `PLRD <serial> <waiting memory>`,
+    `RPLD <slices> <done | 0x10>`. In the kit, `city_mc2_rsc_draw_test` has
+    the MC2-only version in `mc2_loading.h` (markers `MLBG`, `MLPH`, `MLRQ`,
+    `MLRD`; `[boot] mlgt = 0` turns the gate off, `mltx = 0` the text).
   - A failed load blocks `StartRace` and queues the native event 20 back to the
     frontend. `PLRD` = data/simple arena ready; `PLDB` = double buffer/caches;
     `PLST` precedes the race and `PLFR` the first draw. `pslg=0` turns off the

@@ -2532,6 +2532,7 @@ static int contains(const char *s, mc3_u32 n, const char *w, mc3_u32 wn) {
     }
     return 0;
 }
+static void mc2_load_progress();       // loading screen counter (mc2_loading.h)
 static void prop_part(PropType *t, const char *part) {
     const mc3_u32 n = word_len(part, 96u);
     const char *pk = kw_particle();
@@ -2579,6 +2580,7 @@ static void prop_line(const char *p) {
         if (!placement) {                                     // a template
             if (s->prop_type_count >= MAX_PROP_TYPES) return;
             PropType *t = &s->prop_types[s->prop_type_count++];
+            mc2_load_progress();
             mc3_u32 n = 0;
             while (q[n] && q[n] != ' ' && q[n] != '\t' && q[n] != '{' && q[n] != '\r' && n < 47u) {
                 t->name[n] = q[n]; ++n;
@@ -2599,6 +2601,7 @@ static void prop_line(const char *p) {
             s->prop_count >= MAX_PROPS) { ++s->prop_bad; hd->rows = 0; return; }
         const PropType *t = &s->prop_types[type];
         const mc3_u32 i = s->prop_count++;
+        if (!(i & 15u)) mc2_load_progress();
         mc3_u32 *mat = (mc3_u32 *)(s->prop_matrices + i * 64u);
         for (int row = 0; row < 4; ++row) {
             for (int k = 0; k < 3; ++k) mat[row * 4 + k] = fbits(hd->m[row][k]);
@@ -3940,9 +3943,10 @@ static mc3_u32 open_cpvs() {
 // loading, and the city went without vertex colours.
 // Marker RCPL <bytes> <largest free block> on each failure, RCPR <bytes>
 // <retries> when it finally fits.
-static void retry_cpvs() {
+static void retry_cpvs(int now = 0) {
     State *s = st();
-    if (s->cpvs_state != 5u || ++s->cpvs_retry % RETRY_FRAMES) return;
+    if (s->cpvs_state != 5u) return;
+    if (!now && ++s->cpvs_retry % RETRY_FRAMES) return;
     if (!cpvs_room(s->cpvs_kept + 16u)) return;
     const mc3_u32 h = open_cpvs();
     if (!h) return;
@@ -5929,14 +5933,60 @@ MC3_HOOK(0x00345420, fe_transition);
 // in (it took ~20 s). Needs `= shim` in the .ini, so the hook is in place for
 // the first race too. Marker RPLD <slices> <finished>.
 enum { START_RACE_CALL = 0x001A58F0, START_RACE = 0x001A3E70, PRELOAD_MAX_SLICES = 200000 };
-static void preload_city() {
-    if (!in_mc2_city() || !state_acquire()) return;
+#include "mc2_loading.h"
+// What the load is doing, for the loading screen (mc2_loading.h).
+static void mc2_publish_phase() {
+    const State *s = st();
+    if (!s) return;
+    if (s->rsc_state < 2u)
+        ml_phase(ML_PACKAGE, s->rsc_cursor >> 10, s->rsc_size >> 10);
+    else if (!s->textures_ready && !s->texture_error)
+        ml_phase(ML_TEXTURES);
+    else if (!s->instances_ready && !s->instances_error)
+        ml_phase(ML_PLACING, s->hood_index, s->hood_count);
+    else if ((s->cpvs_state < 2u || s->cpvs_state == 4u) && !s->cpvs_error)
+        ml_phase(ML_COLOURS, s->cpvs_index, s->cpvs_count);
+    else if (s->prop_state < 2u)
+        ml_phase(ML_PROPS, s->prop_type_count + s->prop_count, 0u);
+    else if (s->sky_state < 2u && sky_enabled())
+        ml_phase(ML_SKY);
+}
+// The props stage runs inside ONE load_step: ~115 prop types, each loading
+// its model from MC2.DAT (most of the ~20 s), then ~3400 placements. The
+// parser calls this per type and every 16 placements: types + placements.
+static void mc2_load_progress() {
+    MLoading *l = ml();
+    const State *s = st();
+    if (l->active && s) ml_phase(ML_PROPS, s->prop_type_count + s->prop_count, 0u);
+}
+// Memory the load waits for: textures (errors 3/5) or the CPVS copy (5).
+static int mc2_waiting_memory() {
+    const State *s = st();
+    return s && (s->texture_error == 3u || s->texture_error == 5u || s->cpvs_state == 5u);
+}
+// The city, whole. `early` = under the loading screen (StopLoading hook):
+// stop at a memory wait instead of spinning; StartRace finishes it once the
+// LoadHeap is gone, retrying what waited.
+static int preload_city(int early = 0) {
+    if (!in_mc2_city() || !state_acquire()) return 0;
     Tracked *t = trk();
     t->active = 1u;
+    if (!early) {
+        State *s = st();
+        if (s->texture_error == 3u || s->texture_error == 5u) s->texture_error = 0u;
+        retry_cpvs(1);
+    }
     mc3_u32 n = 0;
     int done = 0;
-    while (!done && n < PRELOAD_MAX_SLICES) { done = load_step(); ++n; }
-    mark('R','P','L','D', n, (mc3_u32)done);
+    while (!done && n < PRELOAD_MAX_SLICES) {
+        done = load_step(); ++n;
+        if (early) {
+            mc2_publish_phase();
+            if (mc2_waiting_memory()) break;
+        }
+    }
+    mark('R','P','L','D', n, (mc3_u32)done | (early ? 0x10u : 0u));
+    return done;
 }
 extern "C" mc3_u32 start_race_hook(mc3_u32 game) {
     preload_city();
@@ -5964,9 +6014,35 @@ extern "C" mc3_u32 enter_game_hook(mc3_u32 game_state) {
         if (t->active || st()) { release_all(); t->active = 0u; }
         mark('R','N','X','R', city, mc3_heap_free(mc3_heap_active()));
     }
+    // the loading screen of the race being entered: CURRENT can still be San
+    // Diego on the first entry, NEXT is the destination
+    const mc3_u32 next = word(RACE_CONFIG_NEXT);
+    const mc3_u32 destination = ptr(next) ? word(next) : 0xFFFFFFFFu;
+    if (mc2_city_supported(destination)) ml_begin(destination); else ml()->active = 0u;
     return MC3_CALL1(mc3_u32, ENTER_GAME, mc3_u32)(game_state);
 }
 MC3_HOOK(ENTER_GAME_CALL, enter_game_hook);
+
+// EnterStateGame calls StopLoading (jal 0x1A585C -> 0x1AAB08) before
+// StartRace: the whole city loads here, under the loading screen, and only
+// then the transition-out held back by ml_signal_hook may run. A memory wait
+// is not an error: StartRace finishes the load. Markers RPLD <slices>
+// <done | 0x10>, MLRD <serial> <waiting memory>.
+enum { STOP_LOADING_CALL = 0x001A585C, STOP_LOADING = 0x001AAB08 };
+extern "C" mc3_u32 stop_loading_hook() {
+    MLoading *l = ml();
+    const int gate = l->enabled && l->active && mc2_city_supported(l->city);
+    if (gate) {
+        preload_city(1);
+        l->ready = 1u;
+        ml_phase(ML_READY);
+        mark('M','L','R','D', l->serial, mc2_waiting_memory());
+    }
+    const mc3_u32 r = MC3_CALL(mc3_u32, STOP_LOADING)();
+    if (gate) { l->active = 0u; ml_font_release(); }
+    return r;
+}
+MC3_HOOK(STOP_LOADING_CALL, stop_loading_hook);
 
 extern "C" void mod_main() __attribute__((section(".text.start")));
 extern "C" void mod_main() { }
