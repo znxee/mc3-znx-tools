@@ -141,6 +141,12 @@ null heap.
 
   Example: the route table of `mc2_aib_compat`.
 - **Renderer margin:** `HEAP_MARGIN` 0x50000 still applies to the large blocks.
+  Exception measured on 2026-10-10: the PSP single 0xC0000 arena, not sent to
+  the VIF during the loading, takes its own 0x20000 margin. It is the last
+  large reservation before StopLoading frees the LoadHeap. The race's double
+  buffers/caches/mips keep 0x50000. Marker RBLD records the largest block
+  before/after; do not lower the general margin to cover a temporary disc
+  shortage. (Same reasoning as the MC2 CPVS block's own `CPVS_MARGIN`.)
 
 ## 4. Keep the game from reading past 4-city tables
 
@@ -264,4 +270,17 @@ the world, and the city behind it is not drawn.
    in the driver), city/time, game in state 2, `*0x6144C0 == 0` after the load
    and a clean log. Repeat with a change of time and then of city. The results
    button uses the same callback in the Remix; static equivalence does not
-   claim coverage of every race/mode.
+   claim coverage of every race/mode. On 2026-10-09 the 9 cities passed (one
+   Next Race each, race changed, LoadHeap 0, no TLB miss), Los Angeles MC2
+   included after the siren fix (section 4). The PSP cities show on screen as
+   "Los Angeles - LA Remix" and "Tokyo - LA Remix"
+   (`select =los_angeles_-_la_remix`).
+
+## 7. PSP auxiliary assets on the disc (2026-10-10)
+
+The `city/<psp city>/*_traffic.rhf` profiles must be inside `ASSETS.DAT`. On
+the disc backend they are opened by their logical name, without
+`host0:/ASSETS/`: that prefix bypasses the container and produced
+`PSHE <city>/0`. HostFS keeps its loose profiles. The RHF format/fingerprint
+and the original data do not change; check PSRH active and the 770/369 counts
+when packing.
