@@ -36,6 +36,6 @@
 - [mc2 map] Removed the invisible wall under the Tokyo railway arms; pillars now collide only at their feet, and pillars that had no collision now do.
 - [mc2 map] Opponents steer around road pillars instead of getting stuck on them.
 - [mc2 map] Converted MC2 races use MC3's opponent tuning (throttle and rubber band), so opponents are no longer slower than normal.
-- [mc2 map] Partially fixed the white patch at the top of the sky seen with the nitro field of view.
+- [mc2 map] Fixed the white wedges at the top of the sky when looking up or with the nitro field of view.
 - [general] Removed an unused VU1 setting that made PCSX2's multi-threaded VU wait on every program.
 - [loader] The [boot] section of mc3boot.ini is no longer limited to 16 keys.

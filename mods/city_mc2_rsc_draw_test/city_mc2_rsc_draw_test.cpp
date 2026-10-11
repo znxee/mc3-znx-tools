@@ -281,7 +281,9 @@ struct State {
     mc3_u32 additive_tex[MAX_RSC_ENTRIES / 32], bound_additive, additive_on, lit_first_on;
     mc3_u32 glass_broken[MAX_PROPS / 32], glass_count, glass_breaks;   // glass_update
     mc3_u16 glass_list[MAX_GLASS];
-    mc3_u32 last_image, bound_test, soft_on, mat_live;   // use_image / set_test   // see bind_texture
+    mc3_u32 last_image, bound_test, soft_on, mat_live;   // use_image / set_test
+    mc3_u32 sky_clear_on;                                 // sky_clear_colour
+    mc3_u32 sky_skip;                                     // [boot] skyd (diagnostic)   // see bind_texture
     float draw_radius;
     mc3_u32 cpvs_state, cpvs_stream, cpvs_mem, cpvs, cpvs_bytes;
     mc3_u32 cpvs_count, cpvs_error, cpvs_reported, palette;
@@ -5631,6 +5633,44 @@ static int is_refl_chain(mc3_u32 index) {
 }
 // MC2's sky layers at the camera, before anything else: depth test ALWAYS and
 // no Z write, so the city and MC3's cars draw over them wherever they are.
+// The MC2 dome's cap (the 8x8 *_sky_*_cap texture, everything above ~36
+// degrees of elevation) is not drawn (Fork City, 2026-10-10). The dome goes
+// through the props' VU program, which has no near-plane clipping: looking up,
+// or with the nitro's wider field of view at the top of the screen, the cap's
+// fan triangles - one vertex at the zenith, the ring behind the camera - came
+// out as huge fogged wedges, white (the player's savestate; [boot] skyd = 16,
+// the cap left out, measured the top clean, the other packets alone too). The
+// cap is one flat colour, so MC3's own sky hat (mcCity+0x190 -> mcSkyHatClass,
+// no models in an added city: it only clears to m_clearColor, +176 r +180 g
+// +184 b, 0..1; GetClearColor 0x25C110) clears to that colour instead.
+// [boot] skyc = 0 draws the cap and leaves the clear colour alone.
+static int sky_cap(mc3_u32 image) {
+    const State *s = st();
+    if (image >= s->slot_count) return 0;
+    const Slot *t = &s->slots[image];
+    return t->tw == 3u && t->th == 3u && t->bpp == 8u && t->level[0].addr;
+}
+static void sky_clear_colour() {
+    State *s = st();
+    const mc3_u32 city = word(0x00615B40u);
+    const mc3_u32 hat = ptr(city) ? word(city + 0x190u) : 0u;
+    if (!ptr(hat)) return;
+    for (mc3_u32 j = 0; j < s->sky_layers; ++j)
+        for (mc3_u32 k = 0; k < s->sky_layer[j].packets; ++k) {
+            const mc3_u32 image = s->sky_layer[j].slot[k];
+            if (!sky_cap(image)) continue;
+            const Slot *t = &s->slots[image];
+            const mc3_u32 i = *(const mc3_u8 *)t->level[0].addr;          // texel (0, 0)
+            const mc3_u32 at = (i & 0xE7u) | ((i & 0x10u) >> 1) | ((i & 0x08u) << 1);
+            const mc3_u32 c = word(t->pal + 16u + at * 4u);
+            float *rgb = (float *)(hat + 176u);
+            const float k255 = ffrom(0x3B808081u);                       // 1 / 255
+            rgb[0] = (float)(c & 0xFFu) * k255;
+            rgb[1] = (float)((c >> 8) & 0xFFu) * k255;
+            rgb[2] = (float)((c >> 16) & 0xFFu) * k255;
+            return;
+        }
+}
 static void queue_sky(mc3_u32 arena) {
     State *s = st();
     const mc3_u32 ctx = *(volatile mc3_u8 *)GS_CONTEXT;
@@ -5649,6 +5689,8 @@ static void queue_sky(mc3_u32 arena) {
     for (mc3_u32 j = 0; j < s->sky_layers; ++j) {
         const SkyLayer *l = &s->sky_layer[j];
         for (mc3_u32 k = 0; k < l->packets; ++k) {
+            if ((s->sky_skip >> k) & 1u) continue;               // [boot] skyd (diagnostic)
+            if (s->sky_clear_on && sky_cap(l->slot[k])) continue; // see sky_cap
             const mc3_u32 sw = use_image(l->slot[k], arena);
             if (sw) bind_switch(sw);
             queue_ref(l->addr[k], l->qwc[k], 0u, 0u);
@@ -5703,6 +5745,13 @@ static void draw_city() {
         s->soft_on = !(v && v[0] == '0');
     }
     s->additive_on = (mc3_u32)additive_enabled();
+    {
+        const char *v = mc3_bootarg(MC3_ID('s','k','y','c'));
+        s->sky_clear_on = !(v && v[0] == '0');
+        v = mc3_bootarg(MC3_ID('s','k','y','d'));
+        s->sky_skip = 0u;
+        while (v && *v >= '0' && *v <= '9') s->sky_skip = s->sky_skip * 10u + (mc3_u32)(*v++ - '0');
+    }
     {   // [boot] mc2i = 0: lit-window layers in file order (after their facade)
         const char *v = mc3_bootarg(MC3_ID('m','c','2','i'));
         s->lit_first_on = !(v && v[0] == '0') && !s->additive_on;
@@ -5719,7 +5768,10 @@ static void draw_city() {
     // memory the palette lives in, and drawn after it (first build of
     // 2026-09-30) the city took its vertex colours from sky vertices - patches
     // of orange/purple that changed with the camera (player's savestate)
-    if (sky) queue_sky(arena);
+    if (sky) {
+        if (s->sky_clear_on) sky_clear_colour();
+        queue_sky(arena);
+    }
     if (cpv) queue_vcl(s->palette);
     if (zwrite_enabled()) queue_zbuf(arena, 1);
     // `_0_refl` chains (the reflective ground) are drawn as everything else and

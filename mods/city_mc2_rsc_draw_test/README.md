@@ -1030,6 +1030,14 @@ with the same markers.
   keyed by the retail CRC and never applies under mc3boot. Cleared at the first
   race (marker VTBT); `[boot] tbit = 1` leaves it.
 
+- **Sky cap.** The dome's cap (the 8x8 `*_sky_*_cap` texture, above ~36 degrees
+  of elevation) is not drawn: the props' VU program has no near-plane clipping,
+  and looking up or with the nitro's field of view its fan triangles came out
+  as huge fogged white wedges. MC3's own sky hat (mcCity+0x190, no models in an
+  added city) clears to the cap's colour instead (m_clearColor +176..+184).
+  `[boot] skyc = 0` draws the cap; `skyd = N` (diagnostic) skips the packets of
+  bit mask N.
+
 Known: in this copy the props are loaded later than in the combined renderer
 and on a full heap some prop types fail (62-86 of 115 in Tokyo), so the
 pillar list can be skipped (no RPLF). The combined renderer loads them all.
